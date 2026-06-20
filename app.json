@@ -8,6 +8,7 @@
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "ios": {
+      "bundleIdentifier": "com.fogworld.app",
       "supportsTablet": true,
       "infoPlist": {
         "UIBackgroundModes": [
@@ -16,6 +17,7 @@
       }
     },
     "android": {
+      "package": "com.fogworld.app",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
