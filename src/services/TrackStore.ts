@@ -71,6 +71,9 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
     dbPromise = (async () => {
       const db = await SQLite.openDatabaseAsync(DB_NAME);
       await migrate(db);
+      // Consolidate any WAL accumulated from prior sessions (repeated reseeds
+      // can bloat it) so cold-start reads stay fast and the file is bounded.
+      await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE)');
       return db;
     })();
   }
