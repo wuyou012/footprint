@@ -47,4 +47,66 @@ export const styles = StyleSheet.create({
   buttonTextActive: {
     color: '#FFFFFF',
   },
+  validationPanel: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 96,
+    backgroundColor: 'rgba(15,23,42,0.85)',
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+  },
+  validationLabel: {
+    color: '#E2E8F0',
+    fontSize: 11,
+    fontWeight: '700',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  validationRow: {
+    alignItems: 'center',
+    paddingRight: 2,
+  },
+  validationButton: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 14,
+    marginRight: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
+  validationButtonActive: {
+    backgroundColor: '#0F766E',
+  },
+  validationButtonText: {
+    color: '#CBD5E1',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  validationButtonTextActive: {
+    color: '#FFFFFF',
+  },
+  zoomRow: {
+    alignSelf: 'center',
+    flexDirection: 'row',
+    marginTop: 6,
+  },
+  zoomButton: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 12,
+    marginHorizontal: 3,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+  },
+  zoomButtonActive: {
+    backgroundColor: '#0F766E',
+  },
+  zoomButtonText: {
+    color: '#CBD5E1',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  zoomButtonTextActive: {
+    color: '#FFFFFF',
+  },
 });

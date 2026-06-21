@@ -25,10 +25,10 @@ export type ImplementedMapProvider = MapProvider & {
 export const MAP_PROVIDERS: Record<MapProviderId, MapProvider> = {
   [MapProviderId.MapLibreWgs84]: {
     id: MapProviderId.MapLibreWgs84,
-    displayName: 'MapLibre Demo Tiles',
+    displayName: 'OpenFreeMap Liberty',
     coordinateSystem: 'WGS84',
     status: 'implemented',
-    mapStyle: 'https://demotiles.maplibre.org/style.json',
+    mapStyle: 'https://tiles.openfreemap.org/styles/liberty',
   },
   [MapProviderId.AmapGcj02]: {
     id: MapProviderId.AmapGcj02,

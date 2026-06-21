@@ -6,7 +6,7 @@ import {
 } from '@maplibre/maplibre-react-native';
 import type { Feature, LineString } from 'geojson';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Text, TouchableOpacity, View } from 'react-native';
+import { ScrollView, Text, TouchableOpacity, View } from 'react-native';
 
 import {
   transformLineString,
@@ -29,6 +29,19 @@ const POINT_COUNTS = [100, 1000, 10000] as const;
 const SEED_COUNT = POINT_COUNTS[0];
 const LOAD_CAP = 20000;
 const FALLBACK_CENTER: LngLat = [-122.4194, 37.7749];
+const TRACK_CAMERA_ID = 'track';
+const VERIFICATION_CITIES: ReadonlyArray<{
+  id: string;
+  label: string;
+  center: LngLat;
+}> = [
+  { id: 'shanghai-lujiazui', label: 'Shanghai', center: [121.505, 31.245] },
+  { id: 'beijing-guomao', label: 'Beijing', center: [116.461, 39.909] },
+  { id: 'new-york-manhattan', label: 'NYC', center: [-73.985, 40.748] },
+  { id: 'los-angeles-downtown', label: 'LA', center: [-118.245, 34.052] },
+];
+const VERIFICATION_ZOOMS = [15, 16, 17] as const;
+type VerificationZoom = (typeof VERIFICATION_ZOOMS)[number];
 
 export function MapTestScreen() {
   const [points, setPoints] = useState<TrackPoint[]>([]);
@@ -38,6 +51,9 @@ export function MapTestScreen() {
   // a synchronous lock: only one seed/load runs at a time (砚砚 review P1/P2).
   // mountedRef stops setState after unmount-during-write.
   const busyRef = useRef(false);
+  const [cameraTargetId, setCameraTargetId] = useState<string>(TRACK_CAMERA_ID);
+  const [verificationZoom, setVerificationZoom] =
+    useState<VerificationZoom>(16);
   const mountedRef = useRef(true);
 
   // Mount: on first launch (empty DB) seed a default walk so there is a visible
@@ -127,15 +143,28 @@ export function MapTestScreen() {
     return coords[Math.floor(coords.length / 2)] ?? FALLBACK_CENTER;
   }, [routeFeature]);
 
+  // P2.5 validation scaffold: when a city is selected the camera jumps to that
+  // city center + chosen zoom (to check building rendering); otherwise it
+  // follows the track (P2 behaviour, unchanged). Remove after P2.5 verdict.
+  const selectedVerificationCity = useMemo(
+    () =>
+      VERIFICATION_CITIES.find((city) => city.id === cameraTargetId) ?? null,
+    [cameraTargetId],
+  );
+  const cameraCenter = selectedVerificationCity?.center ?? center;
+  const cameraZoom = selectedVerificationCity ? verificationZoom : 12;
+
   // A GeoJSON LineString needs >= 2 points; rendering an empty one throws
   // "A line string must have two or more coordinate points" in MapLibre and
   // breaks the source. Guard it: draw the layer only once data has loaded.
+  // P2.5 note: the map style owns the building layers; this track layer is
+  // declared after the style and stays visually above the basemap.
   const hasTrack = points.length >= 2;
 
   return (
     <View style={styles.container}>
       <Map style={styles.map} mapStyle={mapProvider.mapStyle}>
-        <Camera center={center} zoom={12} />
+        <Camera center={cameraCenter} zoom={cameraZoom} />
         {hasTrack && (
           <GeoJSONSource id="track-source" data={routeFeature}>
             <Layer
@@ -161,6 +190,83 @@ export function MapTestScreen() {
               ? 'Loading…'
               : `${points.length.toLocaleString()} pts · SQLite`}
         </Text>
+      </View>
+
+      <View style={styles.validationPanel}>
+        <Text style={styles.validationLabel}>P2.5 validation scaffold</Text>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.validationRow}
+        >
+          <TouchableOpacity
+            style={[
+              styles.validationButton,
+              cameraTargetId === TRACK_CAMERA_ID &&
+                styles.validationButtonActive,
+            ]}
+            onPress={() => {
+              setCameraTargetId(TRACK_CAMERA_ID);
+            }}
+          >
+            <Text
+              style={[
+                styles.validationButtonText,
+                cameraTargetId === TRACK_CAMERA_ID &&
+                  styles.validationButtonTextActive,
+              ]}
+            >
+              Track
+            </Text>
+          </TouchableOpacity>
+          {VERIFICATION_CITIES.map((city) => {
+            const active = cameraTargetId === city.id;
+            return (
+              <TouchableOpacity
+                key={city.id}
+                style={[
+                  styles.validationButton,
+                  active && styles.validationButtonActive,
+                ]}
+                onPress={() => {
+                  setCameraTargetId(city.id);
+                }}
+              >
+                <Text
+                  style={[
+                    styles.validationButtonText,
+                    active && styles.validationButtonTextActive,
+                  ]}
+                >
+                  {city.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+        <View style={styles.zoomRow}>
+          {VERIFICATION_ZOOMS.map((zoom) => {
+            const active = verificationZoom === zoom;
+            return (
+              <TouchableOpacity
+                key={zoom}
+                style={[styles.zoomButton, active && styles.zoomButtonActive]}
+                onPress={() => {
+                  setVerificationZoom(zoom);
+                }}
+              >
+                <Text
+                  style={[
+                    styles.zoomButtonText,
+                    active && styles.zoomButtonTextActive,
+                  ]}
+                >
+                  z{zoom}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
       </View>
 
       <View style={styles.controls}>
