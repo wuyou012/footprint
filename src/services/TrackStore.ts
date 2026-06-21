@@ -90,11 +90,19 @@ export async function countTrackPoints(): Promise<number> {
 
 type TrackPointRow = { lng: number; lat: number; ts: number };
 
+// Public query boundary. A negative LIMIT in SQLite means "unbounded" and huge
+// values blow up memory/render, so clamp to a sane integer range here — this is
+// the single DB choke point all callers go through (砚砚 review P3).
+export const MAX_TRACK_QUERY = 20000;
+
 export async function getTrackPoints(limit: number): Promise<TrackPoint[]> {
+  const safeLimit = Number.isFinite(limit)
+    ? Math.max(0, Math.min(MAX_TRACK_QUERY, Math.floor(limit)))
+    : 0;
   const db = await getDatabase();
   const rows = await db.getAllAsync<TrackPointRow>(
     'SELECT lng, lat, ts FROM track_points ORDER BY ts ASC LIMIT ?',
-    [limit],
+    [safeLimit],
   );
   return rows.map((r) => ({
     longitude: r.lng,
@@ -118,8 +126,13 @@ export async function replaceTrackPoints(
   points: readonly TrackPoint[],
 ): Promise<void> {
   const db = await getDatabase();
-  await db.withTransactionAsync(async () => {
-    await db.execAsync('DELETE FROM track_points');
+  // EXCLUSIVE: expo-sqlite's withTransactionAsync is NOT exclusive — a concurrent
+  // async query can interleave it. Two "replace all" runs could then mix
+  // (DELETE, DELETE, partial INSERT, partial INSERT) and corrupt the table.
+  // withExclusiveTransactionAsync serializes at the DB so seeds can never
+  // interleave; all statements run on the txn handle, not db (砚砚 review P1).
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    await txn.execAsync('DELETE FROM track_points');
     for (let i = 0; i < points.length; i += ROWS_PER_INSERT) {
       const chunk = points.slice(i, i + ROWS_PER_INSERT);
       const placeholders = chunk.map(() => '(?, ?, ?)').join(', ');
@@ -127,7 +140,7 @@ export async function replaceTrackPoints(
       for (const p of chunk) {
         params.push(p.longitude, p.latitude, p.timestamp);
       }
-      await db.runAsync(
+      await txn.runAsync(
         `INSERT INTO track_points (lng, lat, ts) VALUES ${placeholders}`,
         params,
       );

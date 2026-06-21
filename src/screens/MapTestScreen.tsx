@@ -5,8 +5,8 @@ import {
   Map,
 } from '@maplibre/maplibre-react-native';
 import type { Feature, LineString } from 'geojson';
-import { useEffect, useMemo, useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Text, TouchableOpacity, View } from 'react-native';
 
 import {
   transformLineString,
@@ -20,6 +20,7 @@ import {
   type TrackPoint,
 } from '../services/TrackDataSource';
 import { countTrackPoints, replaceTrackPoints } from '../services/TrackStore';
+import { styles } from './MapTestScreen.styles';
 
 const mapProvider = getMapProvider();
 const trackSource = createSqliteTrackDataSource();
@@ -33,33 +34,40 @@ export function MapTestScreen() {
   const [points, setPoints] = useState<TrackPoint[]>([]);
   const [busy, setBusy] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  // `busy` state is async, so it can't hard-block a fast double-tap. busyRef is
+  // a synchronous lock: only one seed/load runs at a time (砚砚 review P1/P2).
+  // mountedRef stops setState after unmount-during-write.
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
 
   // Mount: on first launch (empty DB) seed a default walk so there is a visible
   // track, then load whatever is persisted in SQLite. The track is rendered
   // from the DB, so it survives an app restart — the P2 acceptance bar.
   useEffect(() => {
-    let alive = true;
+    mountedRef.current = true;
+    busyRef.current = true;
     (async () => {
       try {
         if ((await countTrackPoints()) === 0) {
           await replaceTrackPoints(generateMockWalk(SEED_COUNT));
         }
         const loaded = await trackSource.getPoints(LOAD_CAP);
-        if (alive) {
+        if (mountedRef.current) {
           setPoints(loaded);
         }
       } catch (e) {
-        if (alive) {
+        if (mountedRef.current) {
           setError(e instanceof Error ? e.message : String(e));
         }
       } finally {
-        if (alive) {
+        busyRef.current = false;
+        if (mountedRef.current) {
           setBusy(false);
         }
       }
     })();
     return () => {
-      alive = false;
+      mountedRef.current = false;
     };
   }, []);
 
@@ -67,15 +75,29 @@ export function MapTestScreen() {
   // exercises the real write + read path at 100 / 1,000 / 10,000 scale, and
   // changes the persisted state so a restart shows the last seeded count.
   async function seed(count: number): Promise<void> {
+    // Synchronous re-entry guard: reject a tap while another seed/load is in
+    // flight (disabled={busy} lags one render behind, so it isn't a hard lock).
+    if (busyRef.current) {
+      return;
+    }
+    busyRef.current = true;
     setBusy(true);
     setError(null);
     try {
       await replaceTrackPoints(generateMockWalk(count));
-      setPoints(await trackSource.getPoints(LOAD_CAP));
+      const loaded = await trackSource.getPoints(LOAD_CAP);
+      if (mountedRef.current) {
+        setPoints(loaded);
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (mountedRef.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setBusy(false);
+      busyRef.current = false;
+      if (mountedRef.current) {
+        setBusy(false);
+      }
     }
   }
 
@@ -165,52 +187,3 @@ export function MapTestScreen() {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#F8FAFC',
-  },
-  map: {
-    flex: 1,
-  },
-  badge: {
-    position: 'absolute',
-    top: 56,
-    alignSelf: 'center',
-    backgroundColor: 'rgba(15,23,42,0.85)',
-    borderRadius: 16,
-    paddingVertical: 6,
-    paddingHorizontal: 14,
-  },
-  badgeText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  controls: {
-    position: 'absolute',
-    bottom: 40,
-    alignSelf: 'center',
-    flexDirection: 'row',
-    backgroundColor: 'rgba(15,23,42,0.85)',
-    borderRadius: 24,
-    padding: 4,
-  },
-  button: {
-    paddingVertical: 8,
-    paddingHorizontal: 18,
-    borderRadius: 20,
-  },
-  buttonActive: {
-    backgroundColor: '#0F766E',
-  },
-  buttonText: {
-    color: '#CBD5E1',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  buttonTextActive: {
-    color: '#FFFFFF',
-  },
-});
