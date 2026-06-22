@@ -25,6 +25,15 @@ import { styles } from './MapTestScreen.styles';
 const mapProvider = getMapProvider();
 const trackSource = createSqliteTrackDataSource();
 
+// P2.5: 2D uses OpenFreeMap Positron — flat 2D building footprints only, NO
+// fill-extrusion, fewer layers => lighter render + lower memory. 3D uses
+// Liberty (has the building-3d extrusion layer). The toggle keeps the 3D
+// interface. Both are WGS-84 OpenMapTiles, no API key.
+const BUILDING_STYLE_URLS: Record<'2d' | '3d', string> = {
+  '2d': 'https://tiles.openfreemap.org/styles/positron',
+  '3d': 'https://tiles.openfreemap.org/styles/liberty',
+};
+
 const POINT_COUNTS = [100, 1000, 10000] as const;
 const SEED_COUNT = POINT_COUNTS[0];
 const LOAD_CAP = 20000;
@@ -54,6 +63,9 @@ export function MapTestScreen() {
   const [cameraTargetId, setCameraTargetId] = useState<string>(TRACK_CAMERA_ID);
   const [verificationZoom, setVerificationZoom] =
     useState<VerificationZoom>(16);
+  // P2.5: 2D building footprints by default — lighter to render + lower memory
+  // than Liberty's 3D fill-extrusion. '3d' re-enables it. Interface kept (toggle).
+  const [buildingMode, setBuildingMode] = useState<'2d' | '3d'>('2d');
   const mountedRef = useRef(true);
 
   // Mount: on first launch (empty DB) seed a default walk so there is a visible
@@ -163,7 +175,7 @@ export function MapTestScreen() {
 
   return (
     <View style={styles.container}>
-      <Map style={styles.map} mapStyle={mapProvider.mapStyle}>
+      <Map style={styles.map} mapStyle={BUILDING_STYLE_URLS[buildingMode]}>
         <Camera center={cameraCenter} zoom={cameraZoom} />
         {hasTrack && (
           <GeoJSONSource id="track-source" data={routeFeature}>
@@ -262,6 +274,29 @@ export function MapTestScreen() {
                   ]}
                 >
                   z{zoom}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+        <View style={styles.zoomRow}>
+          {(['2d', '3d'] as const).map((mode) => {
+            const active = buildingMode === mode;
+            return (
+              <TouchableOpacity
+                key={mode}
+                style={[styles.zoomButton, active && styles.zoomButtonActive]}
+                onPress={() => {
+                  setBuildingMode(mode);
+                }}
+              >
+                <Text
+                  style={[
+                    styles.zoomButtonText,
+                    active && styles.zoomButtonTextActive,
+                  ]}
+                >
+                  {mode.toUpperCase()}
                 </Text>
               </TouchableOpacity>
             );
