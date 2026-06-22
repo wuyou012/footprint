@@ -12,7 +12,10 @@ import {
   transformLineString,
   type LngLat,
 } from '../services/CoordinateService';
-import { getMapProvider } from '../services/MapProvider';
+import {
+  getMapProvider,
+  type BuildingStyleMode,
+} from '../services/MapProvider';
 import {
   createSqliteTrackDataSource,
   generateMockWalk,
@@ -24,15 +27,6 @@ import { styles } from './MapTestScreen.styles';
 
 const mapProvider = getMapProvider();
 const trackSource = createSqliteTrackDataSource();
-
-// P2.5: 2D uses OpenFreeMap Positron — flat 2D building footprints only, NO
-// fill-extrusion, fewer layers => lighter render + lower memory. 3D uses
-// Liberty (has the building-3d extrusion layer). The toggle keeps the 3D
-// interface. Both are WGS-84 OpenMapTiles, no API key.
-const BUILDING_STYLE_URLS: Record<'2d' | '3d', string> = {
-  '2d': 'https://tiles.openfreemap.org/styles/positron',
-  '3d': 'https://tiles.openfreemap.org/styles/liberty',
-};
 
 const POINT_COUNTS = [100, 1000, 10000] as const;
 const SEED_COUNT = POINT_COUNTS[0];
@@ -63,9 +57,11 @@ export function MapTestScreen() {
   const [cameraTargetId, setCameraTargetId] = useState<string>(TRACK_CAMERA_ID);
   const [verificationZoom, setVerificationZoom] =
     useState<VerificationZoom>(16);
-  // P2.5: 2D building footprints by default — lighter to render + lower memory
-  // than Liberty's 3D fill-extrusion. '3d' re-enables it. Interface kept (toggle).
-  const [buildingMode, setBuildingMode] = useState<'2d' | '3d'>('2d');
+  // P2.5: 2D building footprints by default — avoids Liberty's 3D fill-extrusion
+  // render complexity + gives the flat "截面" look. (Memory measured ~the same:
+  // building-3d is NOT the heap hog — 砚砚 review #3.) '3d' re-enables extrusion;
+  // the toggle keeps the 3D interface.
+  const [buildingMode, setBuildingMode] = useState<BuildingStyleMode>('2d');
   const mountedRef = useRef(true);
 
   // Mount: on first launch (empty DB) seed a default walk so there is a visible
@@ -175,7 +171,7 @@ export function MapTestScreen() {
 
   return (
     <View style={styles.container}>
-      <Map style={styles.map} mapStyle={BUILDING_STYLE_URLS[buildingMode]}>
+      <Map style={styles.map} mapStyle={mapProvider.buildingStyles[buildingMode]}>
         <Camera center={cameraCenter} zoom={cameraZoom} />
         {hasTrack && (
           <GeoJSONSource id="track-source" data={routeFeature}>

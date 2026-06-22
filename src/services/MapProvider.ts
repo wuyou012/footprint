@@ -9,26 +9,35 @@ export enum MapProviderId {
 
 type ProviderStatus = 'implemented' | 'reserved';
 
+export type BuildingStyleMode = '2d' | '3d';
+
 export type MapProvider = {
   id: MapProviderId;
   displayName: string;
   coordinateSystem: CoordinateSystem;
   status: ProviderStatus;
-  mapStyle?: string;
+  // Single source of truth for the map style URLs (W4). 2D = flat building
+  // footprints (Positron, no fill-extrusion); 3D = building-3d extrusion
+  // (Liberty). The screen selects by building mode — it must NOT hold its own
+  // style URLs, or the active style diverges from this provider (砚砚 review #1).
+  buildingStyles?: Record<BuildingStyleMode, string>;
 };
 
 export type ImplementedMapProvider = MapProvider & {
   status: 'implemented';
-  mapStyle: string;
+  buildingStyles: Record<BuildingStyleMode, string>;
 };
 
 export const MAP_PROVIDERS: Record<MapProviderId, MapProvider> = {
   [MapProviderId.MapLibreWgs84]: {
     id: MapProviderId.MapLibreWgs84,
-    displayName: 'OpenFreeMap Liberty',
+    displayName: 'OpenFreeMap (2D Positron / 3D Liberty)',
     coordinateSystem: 'WGS84',
     status: 'implemented',
-    mapStyle: 'https://tiles.openfreemap.org/styles/liberty',
+    buildingStyles: {
+      '2d': 'https://tiles.openfreemap.org/styles/positron',
+      '3d': 'https://tiles.openfreemap.org/styles/liberty',
+    },
   },
   [MapProviderId.AmapGcj02]: {
     id: MapProviderId.AmapGcj02,
@@ -57,7 +66,7 @@ export function getMapProvider(
 ): ImplementedMapProvider {
   const provider = MAP_PROVIDERS[providerId];
 
-  if (provider.status === 'implemented' && provider.mapStyle) {
+  if (provider.status === 'implemented' && provider.buildingStyles) {
     return provider as ImplementedMapProvider;
   }
 
