@@ -22,6 +22,41 @@ export const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
+  recordingPanel: {
+    position: 'absolute',
+    top: 96,
+    alignSelf: 'center',
+    maxWidth: '92%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15,23,42,0.85)',
+    borderRadius: 18,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+  },
+  recordButton: {
+    borderRadius: 14,
+    backgroundColor: '#0F766E',
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+  },
+  recordButtonActive: {
+    backgroundColor: '#B91C1C',
+  },
+  recordButtonDisabled: {
+    opacity: 0.45,
+  },
+  recordButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  recordingStatusText: {
+    color: '#E2E8F0',
+    fontSize: 12,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
   controls: {
     position: 'absolute',
     bottom: 40,
@@ -35,6 +70,9 @@ export const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 18,
     borderRadius: 20,
+  },
+  buttonDisabled: {
+    opacity: 0.45,
   },
   buttonActive: {
     backgroundColor: '#0F766E',

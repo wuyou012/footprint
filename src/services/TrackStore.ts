@@ -88,7 +88,12 @@ export async function countTrackPoints(): Promise<number> {
   return row?.c ?? 0;
 }
 
-type TrackPointRow = { lng: number; lat: number; ts: number };
+type TrackPointRow = {
+  lng: number;
+  lat: number;
+  ts: number;
+  accuracy: number | null;
+};
 
 // Public query boundary. A negative LIMIT in SQLite means "unbounded" and huge
 // values blow up memory/render, so clamp to a sane integer range here — this is
@@ -101,13 +106,14 @@ export async function getTrackPoints(limit: number): Promise<TrackPoint[]> {
     : 0;
   const db = await getDatabase();
   const rows = await db.getAllAsync<TrackPointRow>(
-    'SELECT lng, lat, ts FROM track_points ORDER BY ts ASC LIMIT ?',
+    'SELECT lng, lat, ts, accuracy FROM track_points ORDER BY ts ASC LIMIT ?',
     [safeLimit],
   );
   return rows.map((r) => ({
     longitude: r.lng,
     latitude: r.lat,
     timestamp: r.ts,
+    accuracy: r.accuracy,
   }));
 }
 
@@ -117,6 +123,26 @@ export async function getTrackPoints(limit: number): Promise<TrackPoint[]> {
 // ~20s freeze and a snappy write.
 const COLUMNS_PER_ROW = 3;
 const ROWS_PER_INSERT = 300;
+
+/**
+ * Append one foreground GPS sample. It uses the same exclusive transaction
+ * boundary as replaceTrackPoints so a live GPS append cannot interleave with a
+ * mock reseed/delete-all operation.
+ */
+export async function appendTrackPoint(point: TrackPoint): Promise<void> {
+  const db = await getDatabase();
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    await txn.runAsync(
+      'INSERT INTO track_points (lng, lat, ts, accuracy) VALUES (?, ?, ?, ?)',
+      [
+        point.longitude,
+        point.latitude,
+        point.timestamp,
+        point.accuracy ?? null,
+      ],
+    );
+  });
+}
 
 /**
  * Replace all stored points with `points`, in a single transaction. Used by

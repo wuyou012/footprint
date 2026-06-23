@@ -10,6 +10,7 @@ export type TrackPoint = {
   longitude: number;
   latitude: number;
   timestamp: number;
+  accuracy?: number | null;
 };
 
 /**
