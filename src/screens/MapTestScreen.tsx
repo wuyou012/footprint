@@ -13,6 +13,7 @@ import {
   transformLineString,
   type LngLat,
 } from '../services/CoordinateService';
+import { exportTrackAsGpx } from '../services/GpxExport';
 import {
   getMapProvider,
   type BuildingStyleMode,
@@ -96,17 +97,12 @@ export function MapTestScreen() {
   const [error, setError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordingStatus, setRecordingStatus] = useState('GPS idle');
-  // `busy` state is async, so it can't hard-block a fast double-tap. busyRef is
-  // a synchronous lock: only one seed/load runs at a time (砚砚 review P1/P2).
-  // mountedRef stops setState after unmount-during-write.
+  const [exporting, setExporting] = useState(false);
   const busyRef = useRef(false);
+  const exportingRef = useRef(false);
   const [cameraTargetId, setCameraTargetId] = useState<string>(TRACK_CAMERA_ID);
   const [verificationZoom, setVerificationZoom] =
     useState<VerificationZoom>(16);
-  // P2.5: 2D building footprints by default — avoids Liberty's 3D fill-extrusion
-  // render complexity + gives the flat "截面" look. (Memory measured ~the same:
-  // building-3d is NOT the heap hog — 砚砚 review #3.) '3d' re-enables extrusion;
-  // the toggle keeps the 3D interface.
   const [buildingMode, setBuildingMode] = useState<BuildingStyleMode>('2d');
   const mountedRef = useRef(true);
   const recordingRef = useRef(false);
@@ -115,9 +111,6 @@ export function MapTestScreen() {
   );
   const locationWriteRef = useRef<Promise<void>>(Promise.resolve());
 
-  // Mount: on first launch (empty DB) seed a default walk so there is a visible
-  // track, then load whatever is persisted in SQLite. The track is rendered
-  // from the DB, so it survives an app restart — the P2 acceptance bar.
   useEffect(() => {
     mountedRef.current = true;
     busyRef.current = true;
@@ -174,7 +167,7 @@ export function MapTestScreen() {
               ? `${Math.round(point.accuracy)}m`
               : 'unknown';
           setRecordingStatus(
-            `Recording GPS · ${loaded.length.toLocaleString()} pts · ±${accuracy}`,
+            `Recording GPS - ${loaded.length.toLocaleString()} pts - +/-${accuracy}`,
           );
         }
       })
@@ -197,7 +190,7 @@ export function MapTestScreen() {
   }
 
   async function startRecording(): Promise<void> {
-    if (busyRef.current || recordingRef.current) {
+    if (busyRef.current || recordingRef.current || exportingRef.current) {
       return;
     }
 
@@ -216,9 +209,6 @@ export function MapTestScreen() {
         throw new Error('Foreground location permission denied');
       }
 
-      // P3 starts a fresh real-world track. Keeping the P2 San Francisco mock
-      // walk would connect it to the first real GPS point and create a huge
-      // false line across the map.
       await replaceTrackPoints([]);
       if (mountedRef.current) {
         setPoints([]);
@@ -266,13 +256,30 @@ export function MapTestScreen() {
     }
   }
 
-  // Perf buttons re-seed N points into SQLite, then read them back — this
-  // exercises the real write + read path at 100 / 1,000 / 10,000 scale, and
-  // changes the persisted state so a restart shows the last seeded count.
+  async function exportGpx(): Promise<void> {
+    if (busyRef.current || recordingRef.current || exportingRef.current) {
+      return;
+    }
+
+    exportingRef.current = true;
+    setExporting(true);
+    setError(null);
+    try {
+      await exportTrackAsGpx(points);
+    } catch (e) {
+      if (mountedRef.current) {
+        setError(formatLocationError(e));
+      }
+    } finally {
+      exportingRef.current = false;
+      if (mountedRef.current) {
+        setExporting(false);
+      }
+    }
+  }
+
   async function seed(count: number): Promise<void> {
-    // Synchronous re-entry guard: reject a tap while another seed/load is in
-    // flight (disabled={busy} lags one render behind, so it isn't a hard lock).
-    if (busyRef.current || recordingRef.current) {
+    if (busyRef.current || recordingRef.current || exportingRef.current) {
       return;
     }
     busyRef.current = true;
@@ -296,9 +303,6 @@ export function MapTestScreen() {
     }
   }
 
-  // P2 seam (unchanged from P1): raw WGS-84 from SQLite is converted to the
-  // active provider's coordinate system at render time — we never persist
-  // pre-transformed coordinates.
   const routeFeature = useMemo<Feature<LineString>>(() => {
     const rawPoints = trackPointsToLngLat(points);
     const renderCoords = transformLineString(
@@ -322,9 +326,6 @@ export function MapTestScreen() {
     return coords[Math.floor(coords.length / 2)] ?? FALLBACK_CENTER;
   }, [routeFeature]);
 
-  // P2.5 validation scaffold: when a city is selected the camera jumps to that
-  // city center + chosen zoom (to check building rendering); otherwise it
-  // follows the track (P2 behaviour, unchanged). Remove after P2.5 verdict.
   const selectedVerificationCity = useMemo(
     () =>
       VERIFICATION_CITIES.find((city) => city.id === cameraTargetId) ?? null,
@@ -333,17 +334,16 @@ export function MapTestScreen() {
   const cameraCenter = selectedVerificationCity?.center ?? center;
   const cameraZoom = selectedVerificationCity ? verificationZoom : 12;
 
-  // A GeoJSON LineString needs >= 2 points; rendering an empty one throws
-  // "A line string must have two or more coordinate points" in MapLibre and
-  // breaks the source. Guard it: draw the layer only once data has loaded.
-  // P2.5 note: the map style owns the building layers; this track layer is
-  // declared after the style and stays visually above the basemap.
   const hasTrack = points.length >= 2;
   const recordingButtonDisabled = busy && !recording;
+  const exportDisabled = busy || recording || exporting || points.length === 0;
 
   return (
     <View style={styles.container}>
-      <Map style={styles.map} mapStyle={mapProvider.buildingStyles[buildingMode]}>
+      <Map
+        style={styles.map}
+        mapStyle={mapProvider.buildingStyles[buildingMode]}
+      >
         <Camera center={cameraCenter} zoom={cameraZoom} />
         {hasTrack && (
           <GeoJSONSource id="track-source" data={routeFeature}>
@@ -365,10 +365,10 @@ export function MapTestScreen() {
       <View style={styles.badge}>
         <Text style={styles.badgeText}>
           {error
-            ? `⚠ ${error}`
+            ? `! ${error}`
             : busy
-              ? 'Loading…'
-              : `${points.length.toLocaleString()} pts · ${
+              ? 'Loading...'
+              : `${points.length.toLocaleString()} pts - ${
                   recording ? 'GPS' : 'SQLite'
                 }`}
         </Text>
@@ -498,16 +498,30 @@ export function MapTestScreen() {
       </View>
 
       <View style={styles.controls}>
+        <TouchableOpacity
+          disabled={exportDisabled}
+          style={[
+            styles.button,
+            exportDisabled && styles.buttonDisabled,
+          ]}
+          onPress={() => {
+            void exportGpx();
+          }}
+        >
+          <Text style={styles.buttonText}>
+            {exporting ? 'Exporting' : 'Export'}
+          </Text>
+        </TouchableOpacity>
         {POINT_COUNTS.map((count) => {
           const active = points.length === count;
           return (
             <TouchableOpacity
               key={count}
-              disabled={busy || recording}
+              disabled={busy || recording || exporting}
               style={[
                 styles.button,
                 active && styles.buttonActive,
-                (busy || recording) && styles.buttonDisabled,
+                (busy || recording || exporting) && styles.buttonDisabled,
               ]}
               onPress={() => {
                 void seed(count);
