@@ -52,9 +52,33 @@ const VERIFICATION_CITIES: ReadonlyArray<{
 const VERIFICATION_ZOOMS = [15, 16, 17] as const;
 type VerificationZoom = (typeof VERIFICATION_ZOOMS)[number];
 
-const GPS_TIME_INTERVAL_MS = 1000;
-const GPS_DISTANCE_INTERVAL_METERS = 5;
-const MAX_ACCEPTED_ACCURACY_METERS = 200;
+type RecordingProfile = 'daily' | 'eco';
+type RecordingProfileConfig = {
+  label: string;
+  accuracy: Location.LocationAccuracy;
+  timeInterval: number;
+  distanceInterval: number;
+  maxAcceptedAccuracyMeters: number;
+};
+
+const RECORDING_PROFILE_ORDER = ['daily', 'eco'] as const;
+const RECORDING_PROFILES: Record<RecordingProfile, RecordingProfileConfig> = {
+  daily: {
+    label: 'Daily',
+    accuracy: Location.Accuracy.Balanced,
+    timeInterval: 30000,
+    distanceInterval: 50,
+    maxAcceptedAccuracyMeters: 200,
+  },
+  eco: {
+    label: 'Eco',
+    // TODO(P3.6): compare Balanced vs Low on the P30 before lowering accuracy.
+    accuracy: Location.Accuracy.Balanced,
+    timeInterval: 60000,
+    distanceInterval: 100,
+    maxAcceptedAccuracyMeters: 300,
+  },
+};
 
 function formatLocationError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -62,6 +86,7 @@ function formatLocationError(e: unknown): string {
 
 function locationToTrackPoint(
   location: Location.LocationObject,
+  maxAcceptedAccuracyMeters: number,
 ): TrackPoint | null {
   const { longitude, latitude, accuracy } = location.coords;
 
@@ -76,7 +101,7 @@ function locationToTrackPoint(
 
   if (
     accuracy !== null &&
-    (!Number.isFinite(accuracy) || accuracy > MAX_ACCEPTED_ACCURACY_METERS)
+    (!Number.isFinite(accuracy) || accuracy > maxAcceptedAccuracyMeters)
   ) {
     return null;
   }
@@ -104,12 +129,15 @@ export function MapTestScreen() {
   const [verificationZoom, setVerificationZoom] =
     useState<VerificationZoom>(16);
   const [buildingMode, setBuildingMode] = useState<BuildingStyleMode>('2d');
+  const [recordingProfile, setRecordingProfile] =
+    useState<RecordingProfile>('daily');
   const mountedRef = useRef(true);
   const recordingRef = useRef(false);
   const locationSubscriptionRef = useRef<Location.LocationSubscription | null>(
     null,
   );
   const locationWriteRef = useRef<Promise<void>>(Promise.resolve());
+  const recordingProfileConfig = RECORDING_PROFILES[recordingProfile];
 
   useEffect(() => {
     mountedRef.current = true;
@@ -147,7 +175,10 @@ export function MapTestScreen() {
       return;
     }
 
-    const point = locationToTrackPoint(location);
+    const point = locationToTrackPoint(
+      location,
+      recordingProfileConfig.maxAcceptedAccuracyMeters,
+    );
     if (!point) {
       if (mountedRef.current) {
         setRecordingStatus('Ignored low accuracy GPS fix');
@@ -167,7 +198,7 @@ export function MapTestScreen() {
               ? `${Math.round(point.accuracy)}m`
               : 'unknown';
           setRecordingStatus(
-            `Recording GPS - ${loaded.length.toLocaleString()} pts - +/-${accuracy}`,
+            `Recording ${recordingProfileConfig.label} - ${loaded.length.toLocaleString()} pts - +/-${accuracy}`,
           );
         }
       })
@@ -197,7 +228,7 @@ export function MapTestScreen() {
     busyRef.current = true;
     setBusy(true);
     setError(null);
-    setRecordingStatus('Checking GPS...');
+    setRecordingStatus(`Checking ${recordingProfileConfig.label} GPS...`);
 
     try {
       if (!(await Location.hasServicesEnabledAsync())) {
@@ -220,9 +251,9 @@ export function MapTestScreen() {
 
       const subscription = await Location.watchPositionAsync(
         {
-          accuracy: Location.Accuracy.High,
-          timeInterval: GPS_TIME_INTERVAL_MS,
-          distanceInterval: GPS_DISTANCE_INTERVAL_METERS,
+          accuracy: recordingProfileConfig.accuracy,
+          timeInterval: recordingProfileConfig.timeInterval,
+          distanceInterval: recordingProfileConfig.distanceInterval,
           mayShowUserSettingsDialog: true,
         },
         enqueueLocation,
@@ -239,7 +270,7 @@ export function MapTestScreen() {
       }
       locationSubscriptionRef.current = subscription;
       if (mountedRef.current) {
-        setRecordingStatus('Recording GPS');
+        setRecordingStatus(`Recording ${recordingProfileConfig.label}`);
       }
     } catch (e) {
       recordingRef.current = false;
@@ -337,6 +368,7 @@ export function MapTestScreen() {
   const hasTrack = points.length >= 2;
   const recordingButtonDisabled = busy && !recording;
   const exportDisabled = busy || recording || exporting || points.length === 0;
+  const profileSwitchDisabled = busy || recording || exporting;
 
   return (
     <View style={styles.container}>
@@ -399,6 +431,40 @@ export function MapTestScreen() {
 
       <View style={styles.validationPanel}>
         <Text style={styles.validationLabel}>P2.5 validation scaffold</Text>
+        <View style={styles.zoomRow}>
+          {RECORDING_PROFILE_ORDER.map((profile) => {
+            const active = recordingProfile === profile;
+            return (
+              <TouchableOpacity
+                key={profile}
+                disabled={profileSwitchDisabled}
+                style={[
+                  styles.zoomButton,
+                  active && styles.zoomButtonActive,
+                  profileSwitchDisabled && styles.buttonDisabled,
+                ]}
+                onPress={() => {
+                  if (
+                    !busyRef.current &&
+                    !recordingRef.current &&
+                    !exportingRef.current
+                  ) {
+                    setRecordingProfile(profile);
+                  }
+                }}
+              >
+                <Text
+                  style={[
+                    styles.zoomButtonText,
+                    active && styles.zoomButtonTextActive,
+                  ]}
+                >
+                  {RECORDING_PROFILES[profile].label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
