@@ -44,7 +44,11 @@ export function trackPointsToGpx(points: readonly TrackPoint[]): string {
       const lat = point.latitude.toFixed(7);
       const lon = point.longitude.toFixed(7);
       const time = toIsoTime(point.timestamp);
-      return `      <trkpt lat="${lat}" lon="${lon}">\n        <time>${time}</time>\n      </trkpt>`;
+      const ele =
+        typeof point.altitude === 'number' && Number.isFinite(point.altitude)
+          ? `\n        <ele>${point.altitude.toFixed(2)}</ele>`
+          : '';
+      return `      <trkpt lat="${lat}" lon="${lon}">${ele}\n        <time>${time}</time>\n      </trkpt>`;
     })
     .join('\n');
 

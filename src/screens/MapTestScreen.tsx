@@ -15,6 +15,11 @@ import {
 } from '../services/CoordinateService';
 import { exportTrackAsGpx } from '../services/GpxExport';
 import {
+  shouldAcceptPoint,
+  type TrackPointFilterProfile,
+  type TrackPointRejectReason,
+} from '../services/LocationFilter';
+import {
   getMapProvider,
   type BuildingStyleMode,
 } from '../services/MapProvider';
@@ -34,13 +39,14 @@ const FALLBACK_CENTER: LngLat = [-122.4194, 37.7749];
 const TRACK_ZOOM = 14;
 
 type RecordingProfile = 'daily' | 'eco';
-type RecordingProfileConfig = {
+type RecordingProfileConfig = TrackPointFilterProfile & {
   label: string;
   accuracy: Location.LocationAccuracy;
   timeInterval: number;
   distanceInterval: number;
-  maxAcceptedAccuracyMeters: number;
 };
+
+type RejectCounts = Record<TrackPointRejectReason, number>;
 
 const RECORDING_PROFILE_ORDER = ['daily', 'eco'] as const;
 const RECORDING_PROFILES: Record<RecordingProfile, RecordingProfileConfig> = {
@@ -50,6 +56,9 @@ const RECORDING_PROFILES: Record<RecordingProfile, RecordingProfileConfig> = {
     timeInterval: 30000,
     distanceInterval: 50,
     maxAcceptedAccuracyMeters: 200,
+    minDistanceMeters: 30,
+    minIntervalMs: 20000,
+    maxSpeedMetersPerSecond: 70,
   },
   eco: {
     label: 'Eco',
@@ -58,6 +67,9 @@ const RECORDING_PROFILES: Record<RecordingProfile, RecordingProfileConfig> = {
     timeInterval: 60000,
     distanceInterval: 100,
     maxAcceptedAccuracyMeters: 300,
+    minDistanceMeters: 80,
+    minIntervalMs: 60000,
+    maxSpeedMetersPerSecond: 70,
   },
 };
 
@@ -65,35 +77,36 @@ function formatLocationError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-function locationToTrackPoint(
-  location: Location.LocationObject,
-  maxAcceptedAccuracyMeters: number,
-): TrackPoint | null {
-  const { longitude, latitude, accuracy } = location.coords;
+function finiteOrNull(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
 
-  if (
-    !Number.isFinite(longitude) ||
-    !Number.isFinite(latitude) ||
-    Math.abs(longitude) > 180 ||
-    Math.abs(latitude) > 90
-  ) {
-    return null;
-  }
+function createRejectCounts(): RejectCounts {
+  return {
+    invalid: 0,
+    accuracy: 0,
+    too_close: 0,
+    too_soon: 0,
+    jump: 0,
+  };
+}
 
-  if (
-    accuracy !== null &&
-    (!Number.isFinite(accuracy) || accuracy > maxAcceptedAccuracyMeters)
-  ) {
-    return null;
-  }
+function formatRejectReason(reason: TrackPointRejectReason): string {
+  return reason.replace(/_/g, ' ');
+}
+
+function locationToTrackPoint(location: Location.LocationObject): TrackPoint {
+  const { longitude, latitude, accuracy, speed, altitude, heading } =
+    location.coords;
 
   return {
     longitude,
     latitude,
-    timestamp: Number.isFinite(location.timestamp)
-      ? location.timestamp
-      : Date.now(),
-    accuracy,
+    timestamp: location.timestamp,
+    accuracy: finiteOrNull(accuracy),
+    speed: finiteOrNull(speed),
+    altitude: finiteOrNull(altitude),
+    heading: finiteOrNull(heading),
   };
 }
 
@@ -115,6 +128,10 @@ export function MapTestScreen() {
     null,
   );
   const locationWriteRef = useRef<Promise<void>>(Promise.resolve());
+  const lastAcceptedRef = useRef<TrackPoint | null>(null);
+  const receivedCountRef = useRef(0);
+  const acceptedCountRef = useRef(0);
+  const rejectCountsRef = useRef<RejectCounts>(createRejectCounts());
   const recordingProfileConfig = RECORDING_PROFILES[recordingProfile];
 
   useEffect(() => {
@@ -125,6 +142,7 @@ export function MapTestScreen() {
         const loaded = await trackSource.getPoints(LOAD_CAP);
         if (mountedRef.current) {
           setPoints(loaded);
+          lastAcceptedRef.current = loaded[loaded.length - 1] ?? null;
         }
       } catch (e) {
         if (mountedRef.current) {
@@ -145,35 +163,62 @@ export function MapTestScreen() {
     };
   }, []);
 
+  function resetRecordingCounters(): void {
+    lastAcceptedRef.current = null;
+    receivedCountRef.current = 0;
+    acceptedCountRef.current = 0;
+    rejectCountsRef.current = createRejectCounts();
+  }
+
   function enqueueLocation(location: Location.LocationObject): void {
     if (!recordingRef.current) {
       return;
     }
 
-    const point = locationToTrackPoint(
-      location,
-      recordingProfileConfig.maxAcceptedAccuracyMeters,
-    );
-    if (!point) {
-      if (mountedRef.current) {
-        setRecordingStatus('Ignored low accuracy GPS fix');
-      }
-      return;
-    }
+    const candidate = locationToTrackPoint(location);
+    const activeProfile = recordingProfile;
+    const activeProfileConfig = recordingProfileConfig;
+    receivedCountRef.current += 1;
 
     locationWriteRef.current = locationWriteRef.current
       .catch(() => undefined)
       .then(async () => {
-        await appendTrackPoint(point);
+        const decision = shouldAcceptPoint(
+          lastAcceptedRef.current,
+          candidate,
+          activeProfileConfig,
+        );
+        if (!decision.accept) {
+          rejectCountsRef.current[decision.reason] += 1;
+          if (mountedRef.current) {
+            setRecordingStatus(
+              `Rejected ${formatRejectReason(decision.reason)} - ${acceptedCountRef.current}/${receivedCountRef.current} accepted`,
+            );
+          }
+          return;
+        }
+
+        const acceptedPoint: TrackPoint = {
+          ...candidate,
+          profile: activeProfile,
+          source: 'gps',
+        };
+        await appendTrackPoint(acceptedPoint, {
+          profile: activeProfile,
+          source: 'gps',
+        });
+        lastAcceptedRef.current = acceptedPoint;
+        acceptedCountRef.current += 1;
+
         const loaded = await trackSource.getPoints(LOAD_CAP);
         if (mountedRef.current) {
           setPoints(loaded);
           const accuracy =
-            typeof point.accuracy === 'number'
-              ? `${Math.round(point.accuracy)}m`
+            typeof acceptedPoint.accuracy === 'number'
+              ? `${Math.round(acceptedPoint.accuracy)}m`
               : 'unknown';
           setRecordingStatus(
-            `Recording ${recordingProfileConfig.label} - ${loaded.length.toLocaleString()} pts - +/-${accuracy}`,
+            `Recording ${activeProfileConfig.label} - ${loaded.length.toLocaleString()} pts - ${acceptedCountRef.current}/${receivedCountRef.current} accepted - +/-${accuracy}`,
           );
         }
       })
@@ -191,7 +236,9 @@ export function MapTestScreen() {
     recordingRef.current = false;
     if (mountedRef.current) {
       setRecording(false);
-      setRecordingStatus('GPS stopped');
+      setRecordingStatus(
+        `GPS stopped - ${acceptedCountRef.current}/${receivedCountRef.current} accepted`,
+      );
     }
   }
 
@@ -216,6 +263,7 @@ export function MapTestScreen() {
       }
 
       await replaceTrackPoints([]);
+      resetRecordingCounters();
       if (mountedRef.current) {
         setPoints([]);
         setRecording(true);
@@ -274,9 +322,6 @@ export function MapTestScreen() {
     } catch (e) {
       if (mountedRef.current) {
         const message = formatLocationError(e);
-        // expo-sharing rejects a second share while a previous share sheet is
-        // still open at the native layer; surface a friendly retry hint instead
-        // of the raw native rejection.
         setError(
           /another share|being processed/i.test(message)
             ? 'A share is still open - close it, then tap Export again'

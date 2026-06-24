@@ -2,21 +2,26 @@ import type { LngLat } from './CoordinateService';
 import { getTrackPoints } from './TrackStore';
 
 /**
- * Track point shape, matching the SQLite `track_points` table (lng / lat /
- * timestamp). Always raw WGS-84 — coordinate-system conversion happens later
- * at render time, never here.
+ * Track point shape, matching the SQLite `track_points` table. Coordinates are
+ * always raw WGS-84; coordinate-system conversion happens at render time.
  */
 export type TrackPoint = {
   longitude: number;
   latitude: number;
   timestamp: number;
   accuracy?: number | null;
+  speed?: number | null;
+  altitude?: number | null;
+  heading?: number | null;
+  segmentId?: number | null;
+  sourceId?: number | null;
+  source?: string | null;
+  profile?: string | null;
 };
 
 /**
  * P2: the source is async because its backing store (SQLite) is async. This
- * replaces P1's synchronous `getPoints(): TrackPoint[]` — MapTestScreen now
- * loads via effect + state instead of a synchronous useMemo.
+ * replaces P1's synchronous `getPoints(): TrackPoint[]`.
  */
 export type TrackDataSource = {
   getPoints(count: number): Promise<TrackPoint[]>;
@@ -26,9 +31,8 @@ const DEFAULT_ORIGIN: LngLat = [-122.4194, 37.7749];
 
 /**
  * Pure generator: a wandering walk from `origin`, ~10-15 m per step with
- * sinusoidal wobble so the rendered line looks like a real footpath rather
- * than a straight ruler. All output is raw WGS-84. Used to seed the SQLite
- * store (first launch + perf buttons).
+ * sinusoidal wobble. Kept for later P3.6-D stress tests, not for production
+ * cold-start seeding.
  */
 export function generateMockWalk(
   count: number,
@@ -43,6 +47,7 @@ export function generateMockWalk(
       longitude: originLng + i * 0.00012 + Math.sin(i / 8) * 0.0006,
       latitude: originLat + i * 0.00009 + Math.cos(i / 11) * 0.0004,
       timestamp: startTime + i * 1000,
+      source: 'mock',
     });
   }
 

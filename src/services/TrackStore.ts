@@ -3,33 +3,25 @@ import * as SQLite from 'expo-sqlite';
 import type { TrackPoint } from './TrackDataSource';
 
 /**
- * P2 SQLite store.
+ * SQLite store for raw WGS-84 track points.
  *
- * Persists track points locally so a track survives an app restart (the P2
- * acceptance bar). Coordinates are stored as **raw WGS-84** only — coordinate
- * conversion happens at render time via CoordinateService, never on the way
- * into storage.
- *
- * The schema creates `track_points` (active) plus reserved skeleton tables
- * (`source` / `footprint_events` / `place_stats`) up front so later phases add
- * rows without a migration. expo-sqlite is async, so every accessor is a
- * Promise — this is why the P1 `TrackDataSource` interface becomes async.
+ * Data safety rule: migrations are additive and preserve existing user points.
+ * Never drop or recreate `track_points` in a local migration.
  */
 const DB_NAME = 'footprint.db';
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
-async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
+async function getUserVersion(db: SQLite.SQLiteDatabase): Promise<number> {
   const row = await db.getFirstAsync<{ user_version: number }>(
     'PRAGMA user_version',
   );
-  if ((row?.user_version ?? 0) >= SCHEMA_VERSION) {
-    return;
-  }
+  return row?.user_version ?? 0;
+}
 
+async function migrateToV1(db: SQLite.SQLiteDatabase): Promise<void> {
   await db.execAsync(`
-    PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS track_points (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       lng REAL NOT NULL,
@@ -62,8 +54,85 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       point_count INTEGER NOT NULL DEFAULT 0,
       updated_ts INTEGER
     );
-    PRAGMA user_version = ${SCHEMA_VERSION};
+    PRAGMA user_version = 1;
   `);
+}
+
+async function hasColumn(
+  db: SQLite.SQLiteDatabase,
+  tableName: string,
+  columnName: string,
+): Promise<boolean> {
+  const rows = await db.getAllAsync<{ name: string }>(
+    `PRAGMA table_info(${tableName})`,
+  );
+  return rows.some((row) => row.name === columnName);
+}
+
+async function addColumnIfMissing(
+  db: SQLite.SQLiteDatabase,
+  tableName: string,
+  columnName: string,
+  definition: string,
+): Promise<void> {
+  if (!(await hasColumn(db, tableName, columnName))) {
+    await db.execAsync(`ALTER TABLE ${tableName} ADD COLUMN ${definition}`);
+  }
+}
+
+async function migrateToV2(db: SQLite.SQLiteDatabase): Promise<void> {
+  await addColumnIfMissing(db, 'track_points', 'heading', 'heading REAL');
+  await addColumnIfMissing(db, 'track_points', 'profile', 'profile TEXT');
+  await addColumnIfMissing(db, 'track_points', 'source', 'source TEXT');
+
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS recording_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile TEXT,
+      start_ts INTEGER,
+      end_ts INTEGER,
+      received_count INTEGER NOT NULL DEFAULT 0,
+      accepted_count INTEGER NOT NULL DEFAULT 0,
+      rejected_count INTEGER NOT NULL DEFAULT 0,
+      reject_accuracy_count INTEGER NOT NULL DEFAULT 0,
+      reject_too_close_count INTEGER NOT NULL DEFAULT 0,
+      reject_too_soon_count INTEGER NOT NULL DEFAULT 0,
+      reject_invalid_count INTEGER NOT NULL DEFAULT 0,
+      reject_jump_count INTEGER NOT NULL DEFAULT 0,
+      battery_start REAL,
+      battery_end REAL,
+      db_size_start INTEGER,
+      db_size_end INTEGER,
+      distance_meters REAL,
+      gpx_size_bytes INTEGER,
+      stop_reason TEXT,
+      created_ts INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS track_segments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER,
+      start_ts INTEGER,
+      end_ts INTEGER,
+      point_count INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_track_points_lat_lng
+      ON track_points (lat, lng);
+    CREATE INDEX IF NOT EXISTS idx_track_points_segment_ts
+      ON track_points (segment_id, ts);
+    PRAGMA user_version = 2;
+  `);
+}
+
+async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
+  await db.execAsync('PRAGMA journal_mode = WAL');
+
+  const version = await getUserVersion(db);
+  if (version < 1) {
+    await migrateToV1(db);
+  }
+  if (version < 2) {
+    await migrateToV2(db);
+  }
 }
 
 export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
@@ -71,8 +140,6 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
     dbPromise = (async () => {
       const db = await SQLite.openDatabaseAsync(DB_NAME);
       await migrate(db);
-      // Consolidate any WAL accumulated from prior sessions (repeated reseeds
-      // can bloat it) so cold-start reads stay fast and the file is bounded.
       await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE)');
       return db;
     })();
@@ -93,11 +160,15 @@ type TrackPointRow = {
   lat: number;
   ts: number;
   accuracy: number | null;
+  speed: number | null;
+  altitude: number | null;
+  heading: number | null;
+  segment_id: number | null;
+  source_id: number | null;
+  source: string | null;
+  profile: string | null;
 };
 
-// Public query boundary. A negative LIMIT in SQLite means "unbounded" and huge
-// values blow up memory/render, so clamp to a sane integer range here — this is
-// the single DB choke point all callers go through (砚砚 review P3).
 export const MAX_TRACK_QUERY = 20000;
 
 export async function getTrackPoints(limit: number): Promise<TrackPoint[]> {
@@ -106,7 +177,11 @@ export async function getTrackPoints(limit: number): Promise<TrackPoint[]> {
     : 0;
   const db = await getDatabase();
   const rows = await db.getAllAsync<TrackPointRow>(
-    'SELECT lng, lat, ts, accuracy FROM track_points ORDER BY ts ASC LIMIT ?',
+    `SELECT lng, lat, ts, accuracy, speed, altitude, heading,
+      segment_id, source_id, source, profile
+     FROM track_points
+     ORDER BY ts ASC
+     LIMIT ?`,
     [safeLimit],
   );
   return rows.map((r) => ({
@@ -114,49 +189,63 @@ export async function getTrackPoints(limit: number): Promise<TrackPoint[]> {
     latitude: r.lat,
     timestamp: r.ts,
     accuracy: r.accuracy,
+    speed: r.speed,
+    altitude: r.altitude,
+    heading: r.heading,
+    segmentId: r.segment_id,
+    sourceId: r.source_id,
+    source: r.source,
+    profile: r.profile,
   }));
 }
 
-// Chunked multi-row INSERT: SQLite caps bound params at 999, and 3 columns per
-// row means up to 333 rows per statement. 300 keeps headroom while turning a
-// 10k insert from ~10k native round-trips into ~34 — the difference between a
-// ~20s freeze and a snappy write.
-const COLUMNS_PER_ROW = 3;
-const ROWS_PER_INSERT = 300;
+export type AppendTrackPointOptions = {
+  profile?: string | null;
+  source?: string | null;
+  segmentId?: number | null;
+  sourceId?: number | null;
+};
 
-/**
- * Append one foreground GPS sample. It uses the same exclusive transaction
- * boundary as replaceTrackPoints so a live GPS append cannot interleave with a
- * mock reseed/delete-all operation.
- */
-export async function appendTrackPoint(point: TrackPoint): Promise<void> {
+export async function appendTrackPoint(
+  point: TrackPoint,
+  options: AppendTrackPointOptions = {},
+): Promise<void> {
   const db = await getDatabase();
   await db.withExclusiveTransactionAsync(async (txn) => {
     await txn.runAsync(
-      'INSERT INTO track_points (lng, lat, ts, accuracy) VALUES (?, ?, ?, ?)',
+      `INSERT INTO track_points (
+        lng, lat, ts, accuracy, speed, altitude, heading,
+        segment_id, source_id, source, profile
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         point.longitude,
         point.latitude,
         point.timestamp,
         point.accuracy ?? null,
+        point.speed ?? null,
+        point.altitude ?? null,
+        point.heading ?? null,
+        options.segmentId ?? point.segmentId ?? null,
+        options.sourceId ?? point.sourceId ?? null,
+        options.source ?? point.source ?? 'gps',
+        options.profile ?? point.profile ?? null,
       ],
     );
   });
 }
 
+const COLUMNS_PER_ROW = 3;
+const ROWS_PER_INSERT = Math.floor(900 / COLUMNS_PER_ROW);
+
 /**
- * Replace all stored points with `points`, in a single transaction. Used by
- * the P2 perf buttons and the first-launch seed. Stores raw WGS-84 only.
+ * Replace all stored points with `points`, in a single exclusive transaction.
+ * Used for explicit reset/stress-test paths only. Existing user data is not
+ * touched by migrations.
  */
 export async function replaceTrackPoints(
   points: readonly TrackPoint[],
 ): Promise<void> {
   const db = await getDatabase();
-  // EXCLUSIVE: expo-sqlite's withTransactionAsync is NOT exclusive — a concurrent
-  // async query can interleave it. Two "replace all" runs could then mix
-  // (DELETE, DELETE, partial INSERT, partial INSERT) and corrupt the table.
-  // withExclusiveTransactionAsync serializes at the DB so seeds can never
-  // interleave; all statements run on the txn handle, not db (砚砚 review P1).
   await db.withExclusiveTransactionAsync(async (txn) => {
     await txn.execAsync('DELETE FROM track_points');
     for (let i = 0; i < points.length; i += ROWS_PER_INSERT) {
