@@ -7,7 +7,7 @@ import {
 import * as Location from 'expo-location';
 import type { Feature, LineString } from 'geojson';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import { Text, TouchableOpacity, View } from 'react-native';
 
 import {
   transformLineString,
@@ -20,37 +20,18 @@ import {
 } from '../services/MapProvider';
 import {
   createSqliteTrackDataSource,
-  generateMockWalk,
   trackPointsToLngLat,
   type TrackPoint,
 } from '../services/TrackDataSource';
-import {
-  appendTrackPoint,
-  countTrackPoints,
-  replaceTrackPoints,
-} from '../services/TrackStore';
+import { appendTrackPoint, replaceTrackPoints } from '../services/TrackStore';
 import { styles } from './MapTestScreen.styles';
 
 const mapProvider = getMapProvider();
 const trackSource = createSqliteTrackDataSource();
 
-const POINT_COUNTS = [100, 1000, 10000] as const;
-const SEED_COUNT = POINT_COUNTS[0];
 const LOAD_CAP = 20000;
 const FALLBACK_CENTER: LngLat = [-122.4194, 37.7749];
-const TRACK_CAMERA_ID = 'track';
-const VERIFICATION_CITIES: ReadonlyArray<{
-  id: string;
-  label: string;
-  center: LngLat;
-}> = [
-  { id: 'shanghai-lujiazui', label: 'Shanghai', center: [121.505, 31.245] },
-  { id: 'beijing-guomao', label: 'Beijing', center: [116.461, 39.909] },
-  { id: 'new-york-manhattan', label: 'NYC', center: [-73.985, 40.748] },
-  { id: 'los-angeles-downtown', label: 'LA', center: [-118.245, 34.052] },
-];
-const VERIFICATION_ZOOMS = [15, 16, 17] as const;
-type VerificationZoom = (typeof VERIFICATION_ZOOMS)[number];
+const TRACK_ZOOM = 14;
 
 type RecordingProfile = 'daily' | 'eco';
 type RecordingProfileConfig = {
@@ -125,9 +106,6 @@ export function MapTestScreen() {
   const [exporting, setExporting] = useState(false);
   const busyRef = useRef(false);
   const exportingRef = useRef(false);
-  const [cameraTargetId, setCameraTargetId] = useState<string>(TRACK_CAMERA_ID);
-  const [verificationZoom, setVerificationZoom] =
-    useState<VerificationZoom>(16);
   const [buildingMode, setBuildingMode] = useState<BuildingStyleMode>('2d');
   const [recordingProfile, setRecordingProfile] =
     useState<RecordingProfile>('daily');
@@ -144,9 +122,6 @@ export function MapTestScreen() {
     busyRef.current = true;
     (async () => {
       try {
-        if ((await countTrackPoints()) === 0) {
-          await replaceTrackPoints(generateMockWalk(SEED_COUNT));
-        }
         const loaded = await trackSource.getPoints(LOAD_CAP);
         if (mountedRef.current) {
           setPoints(loaded);
@@ -243,7 +218,6 @@ export function MapTestScreen() {
       await replaceTrackPoints([]);
       if (mountedRef.current) {
         setPoints([]);
-        setCameraTargetId(TRACK_CAMERA_ID);
         setRecording(true);
         setRecordingStatus('Waiting for GPS fix...');
       }
@@ -299,37 +273,20 @@ export function MapTestScreen() {
       await exportTrackAsGpx(points);
     } catch (e) {
       if (mountedRef.current) {
-        setError(formatLocationError(e));
+        const message = formatLocationError(e);
+        // expo-sharing rejects a second share while a previous share sheet is
+        // still open at the native layer; surface a friendly retry hint instead
+        // of the raw native rejection.
+        setError(
+          /another share|being processed/i.test(message)
+            ? 'A share is still open - close it, then tap Export again'
+            : message,
+        );
       }
     } finally {
       exportingRef.current = false;
       if (mountedRef.current) {
         setExporting(false);
-      }
-    }
-  }
-
-  async function seed(count: number): Promise<void> {
-    if (busyRef.current || recordingRef.current || exportingRef.current) {
-      return;
-    }
-    busyRef.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      await replaceTrackPoints(generateMockWalk(count));
-      const loaded = await trackSource.getPoints(LOAD_CAP);
-      if (mountedRef.current) {
-        setPoints(loaded);
-      }
-    } catch (e) {
-      if (mountedRef.current) {
-        setError(formatLocationError(e));
-      }
-    } finally {
-      busyRef.current = false;
-      if (mountedRef.current) {
-        setBusy(false);
       }
     }
   }
@@ -352,18 +309,10 @@ export function MapTestScreen() {
     };
   }, [points]);
 
-  const center = useMemo<LngLat>(() => {
+  const cameraCenter = useMemo<LngLat>(() => {
     const coords = routeFeature.geometry.coordinates as LngLat[];
     return coords[Math.floor(coords.length / 2)] ?? FALLBACK_CENTER;
   }, [routeFeature]);
-
-  const selectedVerificationCity = useMemo(
-    () =>
-      VERIFICATION_CITIES.find((city) => city.id === cameraTargetId) ?? null,
-    [cameraTargetId],
-  );
-  const cameraCenter = selectedVerificationCity?.center ?? center;
-  const cameraZoom = selectedVerificationCity ? verificationZoom : 12;
 
   const hasTrack = points.length >= 2;
   const recordingButtonDisabled = busy && !recording;
@@ -376,7 +325,7 @@ export function MapTestScreen() {
         style={styles.map}
         mapStyle={mapProvider.buildingStyles[buildingMode]}
       >
-        <Camera center={cameraCenter} zoom={cameraZoom} />
+        <Camera center={cameraCenter} zoom={TRACK_ZOOM} />
         {hasTrack && (
           <GeoJSONSource id="track-source" data={routeFeature}>
             <Layer
@@ -430,7 +379,6 @@ export function MapTestScreen() {
       </View>
 
       <View style={styles.validationPanel}>
-        <Text style={styles.validationLabel}>P2.5 validation scaffold</Text>
         <View style={styles.zoomRow}>
           {RECORDING_PROFILE_ORDER.map((profile) => {
             const active = recordingProfile === profile;
@@ -465,79 +413,6 @@ export function MapTestScreen() {
             );
           })}
         </View>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.validationRow}
-        >
-          <TouchableOpacity
-            style={[
-              styles.validationButton,
-              cameraTargetId === TRACK_CAMERA_ID &&
-                styles.validationButtonActive,
-            ]}
-            onPress={() => {
-              setCameraTargetId(TRACK_CAMERA_ID);
-            }}
-          >
-            <Text
-              style={[
-                styles.validationButtonText,
-                cameraTargetId === TRACK_CAMERA_ID &&
-                  styles.validationButtonTextActive,
-              ]}
-            >
-              Track
-            </Text>
-          </TouchableOpacity>
-          {VERIFICATION_CITIES.map((city) => {
-            const active = cameraTargetId === city.id;
-            return (
-              <TouchableOpacity
-                key={city.id}
-                style={[
-                  styles.validationButton,
-                  active && styles.validationButtonActive,
-                ]}
-                onPress={() => {
-                  setCameraTargetId(city.id);
-                }}
-              >
-                <Text
-                  style={[
-                    styles.validationButtonText,
-                    active && styles.validationButtonTextActive,
-                  ]}
-                >
-                  {city.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-        <View style={styles.zoomRow}>
-          {VERIFICATION_ZOOMS.map((zoom) => {
-            const active = verificationZoom === zoom;
-            return (
-              <TouchableOpacity
-                key={zoom}
-                style={[styles.zoomButton, active && styles.zoomButtonActive]}
-                onPress={() => {
-                  setVerificationZoom(zoom);
-                }}
-              >
-                <Text
-                  style={[
-                    styles.zoomButtonText,
-                    active && styles.zoomButtonTextActive,
-                  ]}
-                >
-                  z{zoom}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
         <View style={styles.zoomRow}>
           {(['2d', '3d'] as const).map((mode) => {
             const active = buildingMode === mode;
@@ -566,10 +441,7 @@ export function MapTestScreen() {
       <View style={styles.controls}>
         <TouchableOpacity
           disabled={exportDisabled}
-          style={[
-            styles.button,
-            exportDisabled && styles.buttonDisabled,
-          ]}
+          style={[styles.button, exportDisabled && styles.buttonDisabled]}
           onPress={() => {
             void exportGpx();
           }}
@@ -578,29 +450,6 @@ export function MapTestScreen() {
             {exporting ? 'Exporting' : 'Export'}
           </Text>
         </TouchableOpacity>
-        {POINT_COUNTS.map((count) => {
-          const active = points.length === count;
-          return (
-            <TouchableOpacity
-              key={count}
-              disabled={busy || recording || exporting}
-              style={[
-                styles.button,
-                active && styles.buttonActive,
-                (busy || recording || exporting) && styles.buttonDisabled,
-              ]}
-              onPress={() => {
-                void seed(count);
-              }}
-            >
-              <Text
-                style={[styles.buttonText, active && styles.buttonTextActive]}
-              >
-                {count.toLocaleString()}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
       </View>
     </View>
   );
