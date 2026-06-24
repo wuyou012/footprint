@@ -4,31 +4,37 @@ import {
   Layer,
   Map,
 } from '@maplibre/maplibre-react-native';
-import * as Location from 'expo-location';
 import type { Feature, LineString } from 'geojson';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Text, TouchableOpacity, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState, Text, TouchableOpacity, View } from 'react-native';
 
+import {
+  isBackgroundRecording,
+  requestBackgroundRecordingPermissions,
+  startBackgroundRecording,
+  stopBackgroundRecording,
+} from '../services/BackgroundLocation';
 import {
   transformLineString,
   type LngLat,
 } from '../services/CoordinateService';
 import { exportTrackAsGpx } from '../services/GpxExport';
 import {
-  shouldAcceptPoint,
-  type TrackPointFilterProfile,
-  type TrackPointRejectReason,
-} from '../services/LocationFilter';
-import {
   getMapProvider,
   type BuildingStyleMode,
 } from '../services/MapProvider';
+import {
+  DEFAULT_RECORDING_PROFILE,
+  RECORDING_PROFILE_ORDER,
+  RECORDING_PROFILES,
+  type RecordingProfile,
+} from '../services/RecordingProfile';
 import {
   createSqliteTrackDataSource,
   trackPointsToLngLat,
   type TrackPoint,
 } from '../services/TrackDataSource';
-import { appendTrackPoint, replaceTrackPoints } from '../services/TrackStore';
+import { replaceTrackPoints } from '../services/TrackStore';
 import { styles } from './MapTestScreen.styles';
 
 const mapProvider = getMapProvider();
@@ -37,77 +43,10 @@ const trackSource = createSqliteTrackDataSource();
 const LOAD_CAP = 20000;
 const FALLBACK_CENTER: LngLat = [-122.4194, 37.7749];
 const TRACK_ZOOM = 14;
-
-type RecordingProfile = 'daily' | 'eco';
-type RecordingProfileConfig = TrackPointFilterProfile & {
-  label: string;
-  accuracy: Location.LocationAccuracy;
-  timeInterval: number;
-  distanceInterval: number;
-};
-
-type RejectCounts = Record<TrackPointRejectReason, number>;
-
-const RECORDING_PROFILE_ORDER = ['daily', 'eco'] as const;
-const RECORDING_PROFILES: Record<RecordingProfile, RecordingProfileConfig> = {
-  daily: {
-    label: 'Daily',
-    accuracy: Location.Accuracy.Balanced,
-    timeInterval: 30000,
-    distanceInterval: 50,
-    maxAcceptedAccuracyMeters: 200,
-    minDistanceMeters: 30,
-    minIntervalMs: 20000,
-    maxSpeedMetersPerSecond: 70,
-  },
-  eco: {
-    label: 'Eco',
-    // TODO(P3.6): compare Balanced vs Low on the P30 before lowering accuracy.
-    accuracy: Location.Accuracy.Balanced,
-    timeInterval: 60000,
-    distanceInterval: 100,
-    maxAcceptedAccuracyMeters: 300,
-    minDistanceMeters: 80,
-    minIntervalMs: 60000,
-    maxSpeedMetersPerSecond: 70,
-  },
-};
+const ACTIVE_REFRESH_INTERVAL_MS = 8000;
 
 function formatLocationError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
-}
-
-function finiteOrNull(value: number | null | undefined): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-function createRejectCounts(): RejectCounts {
-  return {
-    invalid: 0,
-    accuracy: 0,
-    too_close: 0,
-    too_soon: 0,
-    jump: 0,
-  };
-}
-
-function formatRejectReason(reason: TrackPointRejectReason): string {
-  return reason.replace(/_/g, ' ');
-}
-
-function locationToTrackPoint(location: Location.LocationObject): TrackPoint {
-  const { longitude, latitude, accuracy, speed, altitude, heading } =
-    location.coords;
-
-  return {
-    longitude,
-    latitude,
-    timestamp: location.timestamp,
-    accuracy: finiteOrNull(accuracy),
-    speed: finiteOrNull(speed),
-    altitude: finiteOrNull(altitude),
-    heading: finiteOrNull(heading),
-  };
 }
 
 export function MapTestScreen() {
@@ -119,31 +58,45 @@ export function MapTestScreen() {
   const [exporting, setExporting] = useState(false);
   const busyRef = useRef(false);
   const exportingRef = useRef(false);
+  const recordingRef = useRef(false);
   const [buildingMode, setBuildingMode] = useState<BuildingStyleMode>('2d');
   const [recordingProfile, setRecordingProfile] =
-    useState<RecordingProfile>('daily');
+    useState<RecordingProfile>(DEFAULT_RECORDING_PROFILE);
   const mountedRef = useRef(true);
-  const recordingRef = useRef(false);
-  const locationSubscriptionRef = useRef<Location.LocationSubscription | null>(
-    null,
-  );
-  const locationWriteRef = useRef<Promise<void>>(Promise.resolve());
-  const lastAcceptedRef = useRef<TrackPoint | null>(null);
-  const receivedCountRef = useRef(0);
-  const acceptedCountRef = useRef(0);
-  const rejectCountsRef = useRef<RejectCounts>(createRejectCounts());
   const recordingProfileConfig = RECORDING_PROFILES[recordingProfile];
+
+  const loadPoints = useCallback(async (): Promise<void> => {
+    const loaded = await trackSource.getPoints(LOAD_CAP);
+    if (mountedRef.current) {
+      setPoints(loaded);
+    }
+  }, []);
+
+  const syncBackgroundState = useCallback(async (): Promise<boolean> => {
+    const active = await isBackgroundRecording();
+    recordingRef.current = active;
+    if (mountedRef.current) {
+      setRecording(active);
+      setRecordingStatus((current) => {
+        if (active && (current === 'GPS idle' || current === 'GPS stopped')) {
+          return `Background ${recordingProfileConfig.label} recording`;
+        }
+        if (!active && current.startsWith('Background ')) {
+          return 'GPS idle';
+        }
+        return current;
+      });
+    }
+    return active;
+  }, [recordingProfileConfig.label]);
 
   useEffect(() => {
     mountedRef.current = true;
     busyRef.current = true;
     (async () => {
       try {
-        const loaded = await trackSource.getPoints(LOAD_CAP);
-        if (mountedRef.current) {
-          setPoints(loaded);
-          lastAcceptedRef.current = loaded[loaded.length - 1] ?? null;
-        }
+        await loadPoints();
+        await syncBackgroundState();
       } catch (e) {
         if (mountedRef.current) {
           setError(formatLocationError(e));
@@ -157,88 +110,63 @@ export function MapTestScreen() {
     })();
     return () => {
       mountedRef.current = false;
-      recordingRef.current = false;
-      locationSubscriptionRef.current?.remove();
-      locationSubscriptionRef.current = null;
     };
-  }, []);
+  }, [loadPoints, syncBackgroundState]);
 
-  function resetRecordingCounters(): void {
-    lastAcceptedRef.current = null;
-    receivedCountRef.current = 0;
-    acceptedCountRef.current = 0;
-    rejectCountsRef.current = createRejectCounts();
-  }
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        void loadPoints();
+        void syncBackgroundState();
+      }
+    });
 
-  function enqueueLocation(location: Location.LocationObject): void {
-    if (!recordingRef.current) {
+    return () => {
+      subscription.remove();
+    };
+  }, [loadPoints, syncBackgroundState]);
+
+  useEffect(() => {
+    if (!recording) {
+      return undefined;
+    }
+
+    const intervalId = setInterval(() => {
+      void loadPoints();
+      void syncBackgroundState();
+    }, ACTIVE_REFRESH_INTERVAL_MS);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [loadPoints, recording, syncBackgroundState]);
+
+  async function stopRecording(): Promise<void> {
+    if (busyRef.current || exportingRef.current) {
       return;
     }
 
-    const candidate = locationToTrackPoint(location);
-    const activeProfile = recordingProfile;
-    const activeProfileConfig = recordingProfileConfig;
-    receivedCountRef.current += 1;
-
-    locationWriteRef.current = locationWriteRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        const decision = shouldAcceptPoint(
-          lastAcceptedRef.current,
-          candidate,
-          activeProfileConfig,
-        );
-        if (!decision.accept) {
-          rejectCountsRef.current[decision.reason] += 1;
-          if (mountedRef.current) {
-            setRecordingStatus(
-              `Rejected ${formatRejectReason(decision.reason)} - ${acceptedCountRef.current}/${receivedCountRef.current} accepted`,
-            );
-          }
-          return;
-        }
-
-        const acceptedPoint: TrackPoint = {
-          ...candidate,
-          profile: activeProfile,
-          source: 'gps',
-        };
-        await appendTrackPoint(acceptedPoint, {
-          profile: activeProfile,
-          source: 'gps',
-        });
-        lastAcceptedRef.current = acceptedPoint;
-        acceptedCountRef.current += 1;
-
-        const loaded = await trackSource.getPoints(LOAD_CAP);
-        if (mountedRef.current) {
-          setPoints(loaded);
-          const accuracy =
-            typeof acceptedPoint.accuracy === 'number'
-              ? `${Math.round(acceptedPoint.accuracy)}m`
-              : 'unknown';
-          setRecordingStatus(
-            `Recording ${activeProfileConfig.label} - ${loaded.length.toLocaleString()} pts - ${acceptedCountRef.current}/${receivedCountRef.current} accepted - +/-${accuracy}`,
-          );
-        }
-      })
-      .catch((e) => {
-        if (mountedRef.current) {
-          setError(formatLocationError(e));
-          setRecordingStatus('GPS write failed');
-        }
-      });
-  }
-
-  function stopRecording(): void {
-    locationSubscriptionRef.current?.remove();
-    locationSubscriptionRef.current = null;
-    recordingRef.current = false;
-    if (mountedRef.current) {
-      setRecording(false);
-      setRecordingStatus(
-        `GPS stopped - ${acceptedCountRef.current}/${receivedCountRef.current} accepted`,
-      );
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await stopBackgroundRecording();
+      recordingRef.current = false;
+      await loadPoints();
+      if (mountedRef.current) {
+        setRecording(false);
+        setRecordingStatus('GPS stopped');
+      }
+    } catch (e) {
+      if (mountedRef.current) {
+        setError(formatLocationError(e));
+        setRecordingStatus('GPS stop failed');
+      }
+    } finally {
+      busyRef.current = false;
+      if (mountedRef.current) {
+        setBusy(false);
+      }
     }
   }
 
@@ -253,46 +181,23 @@ export function MapTestScreen() {
     setRecordingStatus(`Checking ${recordingProfileConfig.label} GPS...`);
 
     try {
-      if (!(await Location.hasServicesEnabledAsync())) {
-        throw new Error('Location services are disabled');
-      }
-
-      const permission = await Location.requestForegroundPermissionsAsync();
-      if (!permission.granted) {
-        throw new Error('Foreground location permission denied');
-      }
-
+      await requestBackgroundRecordingPermissions();
+      await stopBackgroundRecording();
       await replaceTrackPoints([]);
-      resetRecordingCounters();
       if (mountedRef.current) {
         setPoints([]);
-        setRecording(true);
-        setRecordingStatus('Waiting for GPS fix...');
+        setRecordingStatus('Starting background GPS...');
       }
-      recordingRef.current = true;
 
-      const subscription = await Location.watchPositionAsync(
-        {
-          accuracy: recordingProfileConfig.accuracy,
-          timeInterval: recordingProfileConfig.timeInterval,
-          distanceInterval: recordingProfileConfig.distanceInterval,
-          mayShowUserSettingsDialog: true,
-        },
-        enqueueLocation,
-        (reason) => {
-          if (mountedRef.current) {
-            setError(reason);
-            setRecordingStatus('GPS error');
-          }
-        },
-      );
-      if (!recordingRef.current) {
-        subscription.remove();
-        return;
-      }
-      locationSubscriptionRef.current = subscription;
+      await startBackgroundRecording(recordingProfile, recordingProfileConfig, {
+        permissionsGranted: true,
+      });
+      recordingRef.current = true;
       if (mountedRef.current) {
-        setRecordingStatus(`Recording ${recordingProfileConfig.label}`);
+        setRecording(true);
+        setRecordingStatus(
+          `Background ${recordingProfileConfig.label} recording`,
+        );
       }
     } catch (e) {
       recordingRef.current = false;
@@ -346,7 +251,7 @@ export function MapTestScreen() {
     return {
       type: 'Feature',
       properties: {
-        id: 'p3-track',
+        id: 'p4-track',
         provider: mapProvider.id,
         points: points.length,
       },
@@ -395,7 +300,7 @@ export function MapTestScreen() {
             : busy
               ? 'Loading...'
               : `${points.length.toLocaleString()} pts - ${
-                  recording ? 'GPS' : 'SQLite'
+                  recording ? 'BG GPS' : 'SQLite'
                 }`}
         </Text>
       </View>
@@ -410,7 +315,7 @@ export function MapTestScreen() {
           ]}
           onPress={() => {
             if (recording) {
-              stopRecording();
+              void stopRecording();
             } else {
               void startRecording();
             }

@@ -199,6 +199,34 @@ export async function getTrackPoints(limit: number): Promise<TrackPoint[]> {
   }));
 }
 
+function rowToTrackPoint(r: TrackPointRow): TrackPoint {
+  return {
+    longitude: r.lng,
+    latitude: r.lat,
+    timestamp: r.ts,
+    accuracy: r.accuracy,
+    speed: r.speed,
+    altitude: r.altitude,
+    heading: r.heading,
+    segmentId: r.segment_id,
+    sourceId: r.source_id,
+    source: r.source,
+    profile: r.profile,
+  };
+}
+
+export async function getLastTrackPoint(): Promise<TrackPoint | null> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<TrackPointRow>(
+    `SELECT lng, lat, ts, accuracy, speed, altitude, heading,
+      segment_id, source_id, source, profile
+     FROM track_points
+     ORDER BY ts DESC
+     LIMIT 1`,
+  );
+  return row ? rowToTrackPoint(row) : null;
+}
+
 export type AppendTrackPointOptions = {
   profile?: string | null;
   source?: string | null;
