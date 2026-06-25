@@ -9,7 +9,7 @@ import type { TrackPoint } from './TrackDataSource';
  * Never drop or recreate `track_points` in a local migration.
  */
 const DB_NAME = 'footprint.db';
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -123,6 +123,31 @@ async function migrateToV2(db: SQLite.SQLiteDatabase): Promise<void> {
   `);
 }
 
+async function migrateToV3(db: SQLite.SQLiteDatabase): Promise<void> {
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS location_diagnostics (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      background_received_count INTEGER NOT NULL DEFAULT 0,
+      background_accepted_count INTEGER NOT NULL DEFAULT 0,
+      background_rejected_count INTEGER NOT NULL DEFAULT 0,
+      background_last_fix_ts INTEGER,
+      background_last_accepted_ts INTEGER,
+      background_last_reject_reason TEXT,
+      background_last_error TEXT,
+      raw_received_count INTEGER NOT NULL DEFAULT 0,
+      raw_last_fix_ts INTEGER,
+      raw_last_accuracy REAL,
+      raw_last_lng REAL,
+      raw_last_lat REAL,
+      raw_last_error TEXT,
+      updated_ts INTEGER
+    );
+    INSERT OR IGNORE INTO location_diagnostics (id, updated_ts)
+      VALUES (1, CAST(strftime('%s', 'now') AS INTEGER) * 1000);
+    PRAGMA user_version = 3;
+  `);
+}
+
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
   await db.execAsync('PRAGMA journal_mode = WAL');
 
@@ -132,6 +157,9 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
   }
   if (version < 2) {
     await migrateToV2(db);
+  }
+  if (version < 3) {
+    await migrateToV3(db);
   }
 }
 
@@ -153,6 +181,231 @@ export async function countTrackPoints(): Promise<number> {
     'SELECT COUNT(*) AS c FROM track_points',
   );
   return row?.c ?? 0;
+}
+
+export type LocationDiagnosticSnapshot = {
+  backgroundReceivedCount: number;
+  backgroundAcceptedCount: number;
+  backgroundRejectedCount: number;
+  backgroundLastFixTs: number | null;
+  backgroundLastAcceptedTs: number | null;
+  backgroundLastRejectReason: string | null;
+  backgroundLastError: string | null;
+  rawReceivedCount: number;
+  rawLastFixTs: number | null;
+  rawLastAccuracy: number | null;
+  rawLastLongitude: number | null;
+  rawLastLatitude: number | null;
+  rawLastError: string | null;
+  updatedTs: number | null;
+};
+
+type LocationDiagnosticRow = {
+  background_received_count: number;
+  background_accepted_count: number;
+  background_rejected_count: number;
+  background_last_fix_ts: number | null;
+  background_last_accepted_ts: number | null;
+  background_last_reject_reason: string | null;
+  background_last_error: string | null;
+  raw_received_count: number;
+  raw_last_fix_ts: number | null;
+  raw_last_accuracy: number | null;
+  raw_last_lng: number | null;
+  raw_last_lat: number | null;
+  raw_last_error: string | null;
+  updated_ts: number | null;
+};
+
+function diagnosticRowToSnapshot(
+  row: LocationDiagnosticRow,
+): LocationDiagnosticSnapshot {
+  return {
+    backgroundReceivedCount: row.background_received_count,
+    backgroundAcceptedCount: row.background_accepted_count,
+    backgroundRejectedCount: row.background_rejected_count,
+    backgroundLastFixTs: row.background_last_fix_ts,
+    backgroundLastAcceptedTs: row.background_last_accepted_ts,
+    backgroundLastRejectReason: row.background_last_reject_reason,
+    backgroundLastError: row.background_last_error,
+    rawReceivedCount: row.raw_received_count,
+    rawLastFixTs: row.raw_last_fix_ts,
+    rawLastAccuracy: row.raw_last_accuracy,
+    rawLastLongitude: row.raw_last_lng,
+    rawLastLatitude: row.raw_last_lat,
+    rawLastError: row.raw_last_error,
+    updatedTs: row.updated_ts,
+  };
+}
+
+export async function getLocationDiagnostics(): Promise<LocationDiagnosticSnapshot> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<LocationDiagnosticRow>(
+    `SELECT
+      background_received_count,
+      background_accepted_count,
+      background_rejected_count,
+      background_last_fix_ts,
+      background_last_accepted_ts,
+      background_last_reject_reason,
+      background_last_error,
+      raw_received_count,
+      raw_last_fix_ts,
+      raw_last_accuracy,
+      raw_last_lng,
+      raw_last_lat,
+      raw_last_error,
+      updated_ts
+     FROM location_diagnostics
+     WHERE id = 1`,
+  );
+
+  return diagnosticRowToSnapshot(
+    row ?? {
+      background_received_count: 0,
+      background_accepted_count: 0,
+      background_rejected_count: 0,
+      background_last_fix_ts: null,
+      background_last_accepted_ts: null,
+      background_last_reject_reason: null,
+      background_last_error: null,
+      raw_received_count: 0,
+      raw_last_fix_ts: null,
+      raw_last_accuracy: null,
+      raw_last_lng: null,
+      raw_last_lat: null,
+      raw_last_error: null,
+      updated_ts: null,
+    },
+  );
+}
+
+export async function resetBackgroundDiagnostics(): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync(
+    `UPDATE location_diagnostics
+     SET background_received_count = 0,
+       background_accepted_count = 0,
+       background_rejected_count = 0,
+       background_last_fix_ts = NULL,
+       background_last_accepted_ts = NULL,
+       background_last_reject_reason = NULL,
+       background_last_error = NULL,
+       updated_ts = ?
+     WHERE id = 1`,
+    [Date.now()],
+  );
+}
+
+export async function resetRawDiagnostics(): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync(
+    `UPDATE location_diagnostics
+     SET raw_received_count = 0,
+       raw_last_fix_ts = NULL,
+       raw_last_accuracy = NULL,
+       raw_last_lng = NULL,
+       raw_last_lat = NULL,
+       raw_last_error = NULL,
+       updated_ts = ?
+     WHERE id = 1`,
+    [Date.now()],
+  );
+}
+
+export async function recordBackgroundLocationReceived(
+  point: TrackPoint,
+): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync(
+    `UPDATE location_diagnostics
+     SET background_received_count = background_received_count + 1,
+       background_last_fix_ts = ?,
+       background_last_error = NULL,
+       updated_ts = ?
+     WHERE id = 1`,
+    [point.timestamp, Date.now()],
+  );
+}
+
+export async function recordBackgroundLocationAccepted(
+  point: TrackPoint,
+): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync(
+    `UPDATE location_diagnostics
+     SET background_accepted_count = background_accepted_count + 1,
+       background_last_accepted_ts = ?,
+       background_last_reject_reason = NULL,
+       background_last_error = NULL,
+       updated_ts = ?
+     WHERE id = 1`,
+    [point.timestamp, Date.now()],
+  );
+}
+
+export async function recordBackgroundLocationRejected(
+  point: TrackPoint,
+  reason: string,
+): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync(
+    `UPDATE location_diagnostics
+     SET background_rejected_count = background_rejected_count + 1,
+       background_last_reject_reason = ?,
+       background_last_fix_ts = ?,
+       updated_ts = ?
+     WHERE id = 1`,
+    [reason, point.timestamp, Date.now()],
+  );
+}
+
+export async function recordBackgroundLocationError(
+  message: string,
+): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync(
+    `UPDATE location_diagnostics
+     SET background_last_error = ?,
+       updated_ts = ?
+     WHERE id = 1`,
+    [message, Date.now()],
+  );
+}
+
+export async function recordRawLocationDiagnostic(
+  point: TrackPoint,
+): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync(
+    `UPDATE location_diagnostics
+     SET raw_received_count = raw_received_count + 1,
+       raw_last_fix_ts = ?,
+       raw_last_accuracy = ?,
+       raw_last_lng = ?,
+       raw_last_lat = ?,
+       raw_last_error = NULL,
+       updated_ts = ?
+     WHERE id = 1`,
+    [
+      point.timestamp,
+      point.accuracy ?? null,
+      point.longitude,
+      point.latitude,
+      Date.now(),
+    ],
+  );
+}
+
+export async function recordRawLocationError(message: string): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync(
+    `UPDATE location_diagnostics
+     SET raw_last_error = ?,
+       updated_ts = ?
+     WHERE id = 1`,
+    [message, Date.now()],
+  );
 }
 
 type TrackPointRow = {

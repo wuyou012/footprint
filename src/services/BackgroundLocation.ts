@@ -10,7 +10,14 @@ import {
   type RecordingProfileConfig,
 } from './RecordingProfile';
 import type { TrackPoint } from './TrackDataSource';
-import { appendTrackPoint, getLastTrackPoint } from './TrackStore';
+import {
+  appendTrackPoint,
+  getLastTrackPoint,
+  recordBackgroundLocationAccepted,
+  recordBackgroundLocationError,
+  recordBackgroundLocationReceived,
+  recordBackgroundLocationRejected,
+} from './TrackStore';
 
 export const BACKGROUND_LOCATION_TASK = 'footprint-background-location';
 
@@ -39,35 +46,49 @@ if (!TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {
     BACKGROUND_LOCATION_TASK,
     async ({ data, error }) => {
       if (error) {
+        await recordBackgroundLocationError(error.message);
         return;
       }
 
-      const locations = getLocations(data);
-      if (locations.length === 0) {
-        return;
-      }
-
-      let prevAccepted = await getLastTrackPoint();
-      for (const location of locations) {
-        const candidate: TrackPoint = {
-          ...locationToTrackPoint(location),
-          profile: activeProfile,
-          source: 'gps',
-        };
-        const decision = shouldAcceptPoint(
-          prevAccepted,
-          candidate,
-          activeProfileConfig,
-        );
-        if (!decision.accept) {
-          continue;
+      try {
+        const locations = getLocations(data);
+        if (locations.length === 0) {
+          return;
         }
 
-        await appendTrackPoint(candidate, {
-          profile: activeProfile,
-          source: 'gps',
-        });
-        prevAccepted = candidate;
+        let prevAccepted = await getLastTrackPoint();
+        for (const location of locations) {
+          const candidate: TrackPoint = {
+            ...locationToTrackPoint(location),
+            profile: activeProfile,
+            source: 'gps',
+          };
+          await recordBackgroundLocationReceived(candidate);
+
+          const decision = shouldAcceptPoint(
+            prevAccepted,
+            candidate,
+            activeProfileConfig,
+          );
+          if (!decision.accept) {
+            await recordBackgroundLocationRejected(
+              candidate,
+              decision.reason,
+            );
+            continue;
+          }
+
+          await appendTrackPoint(candidate, {
+            profile: activeProfile,
+            source: 'gps',
+          });
+          await recordBackgroundLocationAccepted(candidate);
+          prevAccepted = candidate;
+        }
+      } catch (e) {
+        await recordBackgroundLocationError(
+          e instanceof Error ? e.message : String(e),
+        );
       }
     },
   );
@@ -114,7 +135,6 @@ export async function startBackgroundRecording(
     accuracy: config.accuracy,
     timeInterval: config.timeInterval,
     distanceInterval: config.distanceInterval,
-    deferredUpdatesInterval: config.timeInterval,
     pausesUpdatesAutomatically: false,
     foregroundService: {
       notificationTitle: 'footprint is recording',

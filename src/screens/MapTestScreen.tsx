@@ -4,6 +4,7 @@ import {
   Layer,
   Map,
 } from '@maplibre/maplibre-react-native';
+import * as Location from 'expo-location';
 import type { Feature, LineString } from 'geojson';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Text, TouchableOpacity, View } from 'react-native';
@@ -19,6 +20,7 @@ import {
   type LngLat,
 } from '../services/CoordinateService';
 import { exportTrackAsGpx } from '../services/GpxExport';
+import { locationToTrackPoint } from '../services/LocationPoint';
 import {
   getMapProvider,
   type BuildingStyleMode,
@@ -34,7 +36,15 @@ import {
   trackPointsToLngLat,
   type TrackPoint,
 } from '../services/TrackDataSource';
-import { replaceTrackPoints } from '../services/TrackStore';
+import {
+  getLocationDiagnostics,
+  recordRawLocationDiagnostic,
+  recordRawLocationError,
+  replaceTrackPoints,
+  resetBackgroundDiagnostics,
+  resetRawDiagnostics,
+  type LocationDiagnosticSnapshot,
+} from '../services/TrackStore';
 import { styles } from './MapTestScreen.styles';
 
 const mapProvider = getMapProvider();
@@ -44,21 +54,64 @@ const LOAD_CAP = 20000;
 const FALLBACK_CENTER: LngLat = [-122.4194, 37.7749];
 const TRACK_ZOOM = 14;
 const ACTIVE_REFRESH_INTERVAL_MS = 8000;
+const RAW_DIAGNOSTIC_INTERVAL_MS = 5000;
+
+const EMPTY_DIAGNOSTICS: LocationDiagnosticSnapshot = {
+  backgroundReceivedCount: 0,
+  backgroundAcceptedCount: 0,
+  backgroundRejectedCount: 0,
+  backgroundLastFixTs: null,
+  backgroundLastAcceptedTs: null,
+  backgroundLastRejectReason: null,
+  backgroundLastError: null,
+  rawReceivedCount: 0,
+  rawLastFixTs: null,
+  rawLastAccuracy: null,
+  rawLastLongitude: null,
+  rawLastLatitude: null,
+  rawLastError: null,
+  updatedTs: null,
+};
 
 function formatLocationError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+function formatClock(timestamp: number | null): string {
+  if (!timestamp) {
+    return 'never';
+  }
+  return new Date(timestamp).toLocaleTimeString();
+}
+
+function formatAccuracy(accuracy: number | null): string {
+  return typeof accuracy === 'number' && Number.isFinite(accuracy)
+    ? `${Math.round(accuracy)}m`
+    : 'n/a';
+}
+
+function formatRawStatus(point: TrackPoint): string {
+  return `Raw fix ${formatClock(point.timestamp)} acc ${formatAccuracy(
+    point.accuracy ?? null,
+  )}`;
+}
+
 export function MapTestScreen() {
   const [points, setPoints] = useState<TrackPoint[]>([]);
+  const [diagnostics, setDiagnostics] =
+    useState<LocationDiagnosticSnapshot>(EMPTY_DIAGNOSTICS);
   const [busy, setBusy] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordingStatus, setRecordingStatus] = useState('GPS idle');
+  const [rawRunning, setRawRunning] = useState(false);
+  const [rawStatus, setRawStatus] = useState('Raw idle');
   const [exporting, setExporting] = useState(false);
   const busyRef = useRef(false);
   const exportingRef = useRef(false);
   const recordingRef = useRef(false);
+  const rawRef = useRef(false);
+  const rawSubscriptionRef = useRef<Location.LocationSubscription | null>(null);
   const [buildingMode, setBuildingMode] = useState<BuildingStyleMode>('2d');
   const [recordingProfile, setRecordingProfile] =
     useState<RecordingProfile>(DEFAULT_RECORDING_PROFILE);
@@ -71,6 +124,17 @@ export function MapTestScreen() {
       setPoints(loaded);
     }
   }, []);
+
+  const loadDiagnostics = useCallback(async (): Promise<void> => {
+    const loaded = await getLocationDiagnostics();
+    if (mountedRef.current) {
+      setDiagnostics(loaded);
+    }
+  }, []);
+
+  const refreshVisibleData = useCallback(async (): Promise<void> => {
+    await Promise.all([loadPoints(), loadDiagnostics()]);
+  }, [loadDiagnostics, loadPoints]);
 
   const syncBackgroundState = useCallback(async (): Promise<boolean> => {
     const active = await isBackgroundRecording();
@@ -95,7 +159,7 @@ export function MapTestScreen() {
     busyRef.current = true;
     (async () => {
       try {
-        await loadPoints();
+        await refreshVisibleData();
         await syncBackgroundState();
       } catch (e) {
         if (mountedRef.current) {
@@ -110,13 +174,15 @@ export function MapTestScreen() {
     })();
     return () => {
       mountedRef.current = false;
+      rawSubscriptionRef.current?.remove();
+      rawSubscriptionRef.current = null;
     };
-  }, [loadPoints, syncBackgroundState]);
+  }, [refreshVisibleData, syncBackgroundState]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
-        void loadPoints();
+        void refreshVisibleData();
         void syncBackgroundState();
       }
     });
@@ -124,22 +190,22 @@ export function MapTestScreen() {
     return () => {
       subscription.remove();
     };
-  }, [loadPoints, syncBackgroundState]);
+  }, [refreshVisibleData, syncBackgroundState]);
 
   useEffect(() => {
-    if (!recording) {
+    if (!recording && !rawRunning) {
       return undefined;
     }
 
     const intervalId = setInterval(() => {
-      void loadPoints();
+      void refreshVisibleData();
       void syncBackgroundState();
     }, ACTIVE_REFRESH_INTERVAL_MS);
 
     return () => {
       clearInterval(intervalId);
     };
-  }, [loadPoints, recording, syncBackgroundState]);
+  }, [rawRunning, recording, refreshVisibleData, syncBackgroundState]);
 
   async function stopRecording(): Promise<void> {
     if (busyRef.current || exportingRef.current) {
@@ -152,7 +218,7 @@ export function MapTestScreen() {
     try {
       await stopBackgroundRecording();
       recordingRef.current = false;
-      await loadPoints();
+      await refreshVisibleData();
       if (mountedRef.current) {
         setRecording(false);
         setRecordingStatus('GPS stopped');
@@ -171,7 +237,12 @@ export function MapTestScreen() {
   }
 
   async function startRecording(): Promise<void> {
-    if (busyRef.current || recordingRef.current || exportingRef.current) {
+    if (
+      busyRef.current ||
+      recordingRef.current ||
+      exportingRef.current ||
+      rawRef.current
+    ) {
       return;
     }
 
@@ -183,6 +254,7 @@ export function MapTestScreen() {
     try {
       await requestBackgroundRecordingPermissions();
       await stopBackgroundRecording();
+      await resetBackgroundDiagnostics();
       await replaceTrackPoints([]);
       if (mountedRef.current) {
         setPoints([]);
@@ -193,6 +265,7 @@ export function MapTestScreen() {
         permissionsGranted: true,
       });
       recordingRef.current = true;
+      await loadDiagnostics();
       if (mountedRef.current) {
         setRecording(true);
         setRecordingStatus(
@@ -205,6 +278,99 @@ export function MapTestScreen() {
         setRecording(false);
         setError(formatLocationError(e));
         setRecordingStatus('GPS unavailable');
+      }
+    } finally {
+      busyRef.current = false;
+      if (mountedRef.current) {
+        setBusy(false);
+      }
+    }
+  }
+
+  async function stopRawDiagnostic(): Promise<void> {
+    rawSubscriptionRef.current?.remove();
+    rawSubscriptionRef.current = null;
+    rawRef.current = false;
+    if (mountedRef.current) {
+      setRawRunning(false);
+      setRawStatus('Raw stopped');
+    }
+    await loadDiagnostics();
+  }
+
+  async function startRawDiagnostic(): Promise<void> {
+    if (
+      busyRef.current ||
+      recordingRef.current ||
+      exportingRef.current ||
+      rawRef.current
+    ) {
+      return;
+    }
+
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    setRawStatus('Checking foreground GPS...');
+
+    try {
+      if (!(await Location.hasServicesEnabledAsync())) {
+        throw new Error('Location services are disabled');
+      }
+
+      const permission = await Location.requestForegroundPermissionsAsync();
+      if (!permission.granted) {
+        throw new Error('Foreground location permission denied');
+      }
+
+      await resetRawDiagnostics();
+      const subscription = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.Balanced,
+          timeInterval: RAW_DIAGNOSTIC_INTERVAL_MS,
+          distanceInterval: 0,
+        },
+        (location) => {
+          const point = locationToTrackPoint(location);
+          void (async () => {
+            try {
+              await recordRawLocationDiagnostic(point);
+              await loadDiagnostics();
+              if (mountedRef.current) {
+                setRawStatus(formatRawStatus(point));
+              }
+            } catch (e) {
+              const message = formatLocationError(e);
+              await recordRawLocationError(message);
+              if (mountedRef.current) {
+                setError(message);
+                setRawStatus('Raw write failed');
+              }
+            }
+          })();
+        },
+        (reason) => {
+          void recordRawLocationError(reason);
+          if (mountedRef.current) {
+            setError(reason);
+            setRawStatus('Raw GPS error');
+          }
+        },
+      );
+
+      rawSubscriptionRef.current = subscription;
+      rawRef.current = true;
+      await loadDiagnostics();
+      if (mountedRef.current) {
+        setRawRunning(true);
+        setRawStatus('Raw waiting for fix');
+      }
+    } catch (e) {
+      rawRef.current = false;
+      if (mountedRef.current) {
+        setRawRunning(false);
+        setError(formatLocationError(e));
+        setRawStatus('Raw unavailable');
       }
     } finally {
       busyRef.current = false;
@@ -264,10 +430,33 @@ export function MapTestScreen() {
     return coords[Math.floor(coords.length / 2)] ?? FALLBACK_CENTER;
   }, [routeFeature]);
 
+  const backgroundLine = useMemo(() => {
+    const last =
+      diagnostics.backgroundLastAcceptedTs ??
+      diagnostics.backgroundLastFixTs;
+    const errorText = diagnostics.backgroundLastError
+      ? ` err ${diagnostics.backgroundLastError}`
+      : '';
+    const rejectText = diagnostics.backgroundLastRejectReason
+      ? ` last reject ${diagnostics.backgroundLastRejectReason}`
+      : '';
+    return `BG ${diagnostics.backgroundAcceptedCount}/${diagnostics.backgroundReceivedCount} accepted - last ${formatClock(last)}${rejectText}${errorText}`;
+  }, [diagnostics]);
+
+  const rawLine = useMemo(() => {
+    const errorText = diagnostics.rawLastError
+      ? ` err ${diagnostics.rawLastError}`
+      : '';
+    return `Raw ${diagnostics.rawReceivedCount} fixes - last ${formatClock(
+      diagnostics.rawLastFixTs,
+    )} acc ${formatAccuracy(diagnostics.rawLastAccuracy)}${errorText}`;
+  }, [diagnostics]);
+
   const hasTrack = points.length >= 2;
-  const recordingButtonDisabled = busy && !recording;
+  const recordingButtonDisabled = (busy && !recording) || rawRunning;
+  const rawButtonDisabled = (busy && !rawRunning) || recording || exporting;
   const exportDisabled = busy || recording || exporting || points.length === 0;
-  const profileSwitchDisabled = busy || recording || exporting;
+  const profileSwitchDisabled = busy || recording || exporting || rawRunning;
 
   return (
     <View style={styles.container}>
@@ -329,6 +518,8 @@ export function MapTestScreen() {
       </View>
 
       <View style={styles.validationPanel}>
+        <Text style={styles.validationLabel}>{backgroundLine}</Text>
+        <Text style={styles.validationLabel}>{rawLine}</Text>
         <View style={styles.zoomRow}>
           {RECORDING_PROFILE_ORDER.map((profile) => {
             const active = recordingProfile === profile;
@@ -345,7 +536,8 @@ export function MapTestScreen() {
                   if (
                     !busyRef.current &&
                     !recordingRef.current &&
-                    !exportingRef.current
+                    !exportingRef.current &&
+                    !rawRef.current
                   ) {
                     setRecordingProfile(profile);
                   }
@@ -390,6 +582,21 @@ export function MapTestScreen() {
 
       <View style={styles.controls}>
         <TouchableOpacity
+          disabled={rawButtonDisabled}
+          style={[styles.button, rawButtonDisabled && styles.buttonDisabled]}
+          onPress={() => {
+            if (rawRunning) {
+              void stopRawDiagnostic();
+            } else {
+              void startRawDiagnostic();
+            }
+          }}
+        >
+          <Text style={styles.buttonText}>
+            {rawRunning ? 'Stop Raw' : 'Raw'}
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
           disabled={exportDisabled}
           style={[styles.button, exportDisabled && styles.buttonDisabled]}
           onPress={() => {
@@ -401,6 +608,12 @@ export function MapTestScreen() {
           </Text>
         </TouchableOpacity>
       </View>
+
+      {rawRunning && (
+        <View style={[styles.badge, { top: 136 }]}>
+          <Text style={styles.badgeText}>{rawStatus}</Text>
+        </View>
+      )}
     </View>
   );
 }
