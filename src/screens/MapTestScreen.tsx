@@ -10,9 +10,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Text, TouchableOpacity, View } from 'react-native';
 
 import {
+  getActiveBackgroundMode,
   isBackgroundRecording,
   requestBackgroundRecordingPermissions,
+  startBackgroundProbe as startBackgroundProbeTask,
   startBackgroundRecording,
+  stopBackgroundProbe as stopBackgroundProbeTask,
   stopBackgroundRecording,
 } from '../services/BackgroundLocation';
 import {
@@ -20,7 +23,14 @@ import {
   type LngLat,
 } from '../services/CoordinateService';
 import { exportTrackAsGpx } from '../services/GpxExport';
-import { locationToTrackPoint } from '../services/LocationPoint';
+import {
+  endProbeSession,
+  exportProbeLog,
+  getProbeSummary,
+  recordRawLocationEvent,
+  startProbeSession,
+  type ProbeSessionSummary,
+} from '../services/RawLocationStore';
 import {
   getMapProvider,
   type BuildingStyleMode,
@@ -38,11 +48,8 @@ import {
 } from '../services/TrackDataSource';
 import {
   getLocationDiagnostics,
-  recordRawLocationDiagnostic,
-  recordRawLocationError,
   replaceTrackPoints,
   resetBackgroundDiagnostics,
-  resetRawDiagnostics,
   type LocationDiagnosticSnapshot,
 } from '../services/TrackStore';
 import { styles } from './MapTestScreen.styles';
@@ -54,7 +61,7 @@ const LOAD_CAP = 20000;
 const FALLBACK_CENTER: LngLat = [-122.4194, 37.7749];
 const TRACK_ZOOM = 14;
 const ACTIVE_REFRESH_INTERVAL_MS = 8000;
-const RAW_DIAGNOSTIC_INTERVAL_MS = 5000;
+const FOREGROUND_PROBE_INTERVAL_MS = 5000;
 
 const EMPTY_DIAGNOSTICS: LocationDiagnosticSnapshot = {
   backgroundReceivedCount: 0,
@@ -77,41 +84,56 @@ function formatLocationError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-function formatClock(timestamp: number | null): string {
+function formatClock(timestamp: number | null | undefined): string {
   if (!timestamp) {
     return 'never';
   }
   return new Date(timestamp).toLocaleTimeString();
 }
 
-function formatAccuracy(accuracy: number | null): string {
+function formatAccuracy(accuracy: number | null | undefined): string {
   return typeof accuracy === 'number' && Number.isFinite(accuracy)
     ? `${Math.round(accuracy)}m`
     : 'n/a';
 }
 
-function formatRawStatus(point: TrackPoint): string {
-  return `Raw fix ${formatClock(point.timestamp)} acc ${formatAccuracy(
-    point.accuracy ?? null,
-  )}`;
+function formatDelay(delayMs: number | null | undefined): string {
+  return typeof delayMs === 'number' && Number.isFinite(delayMs)
+    ? `${Math.round(delayMs / 1000)}s`
+    : 'n/a';
+}
+
+function formatProbeLine(summary: ProbeSessionSummary | null): string {
+  if (!summary) {
+    return 'Probe: no session';
+  }
+
+  return `Probe #${summary.id} ${summary.mode} raw ${summary.rawCount} task ${summary.taskInvokedCount} last ${formatClock(summary.lastReceivedAt)} delay ${formatDelay(summary.lastDeliveryDelayMs)} acc ${formatAccuracy(summary.lastAccuracy)}`;
 }
 
 export function MapTestScreen() {
   const [points, setPoints] = useState<TrackPoint[]>([]);
   const [diagnostics, setDiagnostics] =
     useState<LocationDiagnosticSnapshot>(EMPTY_DIAGNOSTICS);
+  const [probeSummary, setProbeSummary] =
+    useState<ProbeSessionSummary | null>(null);
   const [busy, setBusy] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordingStatus, setRecordingStatus] = useState('GPS idle');
-  const [rawRunning, setRawRunning] = useState(false);
-  const [rawStatus, setRawStatus] = useState('Raw idle');
+  const [foregroundProbeRunning, setForegroundProbeRunning] = useState(false);
+  const [backgroundProbeRunning, setBackgroundProbeRunning] = useState(false);
+  const [probeStatus, setProbeStatus] = useState('Probe idle');
   const [exporting, setExporting] = useState(false);
+  const [exportingProbe, setExportingProbe] = useState(false);
   const busyRef = useRef(false);
   const exportingRef = useRef(false);
   const recordingRef = useRef(false);
-  const rawRef = useRef(false);
-  const rawSubscriptionRef = useRef<Location.LocationSubscription | null>(null);
+  const foregroundProbeRef = useRef(false);
+  const backgroundProbeRef = useRef(false);
+  const probeSessionIdRef = useRef<number | null>(null);
+  const foregroundProbeSubscriptionRef =
+    useRef<Location.LocationSubscription | null>(null);
   const [buildingMode, setBuildingMode] = useState<BuildingStyleMode>('2d');
   const [recordingProfile, setRecordingProfile] =
     useState<RecordingProfile>(DEFAULT_RECORDING_PROFILE);
@@ -132,26 +154,47 @@ export function MapTestScreen() {
     }
   }, []);
 
-  const refreshVisibleData = useCallback(async (): Promise<void> => {
-    await Promise.all([loadPoints(), loadDiagnostics()]);
-  }, [loadDiagnostics, loadPoints]);
-
-  const syncBackgroundState = useCallback(async (): Promise<boolean> => {
-    const active = await isBackgroundRecording();
-    recordingRef.current = active;
+  const loadProbeSummary = useCallback(async (): Promise<void> => {
+    const loaded = await getProbeSummary(probeSessionIdRef.current);
     if (mountedRef.current) {
-      setRecording(active);
+      setProbeSummary(loaded);
+      if (loaded && probeSessionIdRef.current === null) {
+        probeSessionIdRef.current = loaded.id;
+      }
+    }
+  }, []);
+
+  const refreshVisibleData = useCallback(async (): Promise<void> => {
+    await Promise.all([loadPoints(), loadDiagnostics(), loadProbeSummary()]);
+  }, [loadDiagnostics, loadPoints, loadProbeSummary]);
+
+  const syncBackgroundState = useCallback(async (): Promise<void> => {
+    const mode = await getActiveBackgroundMode();
+    recordingRef.current = mode === 'record';
+    backgroundProbeRef.current = mode === 'probe';
+    if (mountedRef.current) {
+      setRecording(mode === 'record');
+      setBackgroundProbeRunning(mode === 'probe');
       setRecordingStatus((current) => {
-        if (active && (current === 'GPS idle' || current === 'GPS stopped')) {
+        if (
+          mode === 'record' &&
+          (current === 'GPS idle' || current === 'GPS stopped')
+        ) {
           return `Background ${recordingProfileConfig.label} recording`;
         }
-        if (!active && current.startsWith('Background ')) {
+        if (mode !== 'record' && current.startsWith('Background ')) {
           return 'GPS idle';
         }
         return current;
       });
+      if (mode === 'probe') {
+        setProbeStatus('Background probe recording');
+      } else if (!foregroundProbeRef.current) {
+        setProbeStatus((current) =>
+          current === 'Background probe recording' ? 'Probe idle' : current,
+        );
+      }
     }
-    return active;
   }, [recordingProfileConfig.label]);
 
   useEffect(() => {
@@ -174,8 +217,8 @@ export function MapTestScreen() {
     })();
     return () => {
       mountedRef.current = false;
-      rawSubscriptionRef.current?.remove();
-      rawSubscriptionRef.current = null;
+      foregroundProbeSubscriptionRef.current?.remove();
+      foregroundProbeSubscriptionRef.current = null;
     };
   }, [refreshVisibleData, syncBackgroundState]);
 
@@ -193,7 +236,7 @@ export function MapTestScreen() {
   }, [refreshVisibleData, syncBackgroundState]);
 
   useEffect(() => {
-    if (!recording && !rawRunning) {
+    if (!recording && !foregroundProbeRunning && !backgroundProbeRunning) {
       return undefined;
     }
 
@@ -205,7 +248,13 @@ export function MapTestScreen() {
     return () => {
       clearInterval(intervalId);
     };
-  }, [rawRunning, recording, refreshVisibleData, syncBackgroundState]);
+  }, [
+    backgroundProbeRunning,
+    foregroundProbeRunning,
+    recording,
+    refreshVisibleData,
+    syncBackgroundState,
+  ]);
 
   async function stopRecording(): Promise<void> {
     if (busyRef.current || exportingRef.current) {
@@ -241,7 +290,8 @@ export function MapTestScreen() {
       busyRef.current ||
       recordingRef.current ||
       exportingRef.current ||
-      rawRef.current
+      foregroundProbeRef.current ||
+      backgroundProbeRef.current
     ) {
       return;
     }
@@ -265,7 +315,7 @@ export function MapTestScreen() {
         permissionsGranted: true,
       });
       recordingRef.current = true;
-      await loadDiagnostics();
+      await refreshVisibleData();
       if (mountedRef.current) {
         setRecording(true);
         setRecordingStatus(
@@ -287,23 +337,13 @@ export function MapTestScreen() {
     }
   }
 
-  async function stopRawDiagnostic(): Promise<void> {
-    rawSubscriptionRef.current?.remove();
-    rawSubscriptionRef.current = null;
-    rawRef.current = false;
-    if (mountedRef.current) {
-      setRawRunning(false);
-      setRawStatus('Raw stopped');
-    }
-    await loadDiagnostics();
-  }
-
-  async function startRawDiagnostic(): Promise<void> {
+  async function startForegroundProbe(): Promise<void> {
     if (
       busyRef.current ||
       recordingRef.current ||
       exportingRef.current ||
-      rawRef.current
+      foregroundProbeRef.current ||
+      backgroundProbeRef.current
     ) {
       return;
     }
@@ -311,8 +351,9 @@ export function MapTestScreen() {
     busyRef.current = true;
     setBusy(true);
     setError(null);
-    setRawStatus('Checking foreground GPS...');
+    setProbeStatus('Checking foreground probe...');
 
+    let sessionId: number | null = null;
     try {
       if (!(await Location.hasServicesEnabledAsync())) {
         throw new Error('Location services are disabled');
@@ -323,54 +364,148 @@ export function MapTestScreen() {
         throw new Error('Foreground location permission denied');
       }
 
-      await resetRawDiagnostics();
+      sessionId = await startProbeSession('foreground', 'probe_static');
+      probeSessionIdRef.current = sessionId;
       const subscription = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.Balanced,
-          timeInterval: RAW_DIAGNOSTIC_INTERVAL_MS,
+          timeInterval: FOREGROUND_PROBE_INTERVAL_MS,
           distanceInterval: 0,
         },
         (location) => {
-          const point = locationToTrackPoint(location);
           void (async () => {
             try {
-              await recordRawLocationDiagnostic(point);
-              await loadDiagnostics();
+              await recordRawLocationEvent({
+                probeSessionId: sessionId,
+                source: 'foreground_watch',
+                appState: 'foreground',
+                profile: 'probe_static',
+                taskInvokedAt: null,
+                locationCountInBatch: 1,
+                location,
+              });
+              await loadProbeSummary();
               if (mountedRef.current) {
-                setRawStatus(formatRawStatus(point));
+                setProbeStatus('Foreground probe receiving');
               }
             } catch (e) {
-              const message = formatLocationError(e);
-              await recordRawLocationError(message);
               if (mountedRef.current) {
-                setError(message);
-                setRawStatus('Raw write failed');
+                setError(formatLocationError(e));
+                setProbeStatus('Foreground probe write failed');
               }
             }
           })();
         },
         (reason) => {
-          void recordRawLocationError(reason);
           if (mountedRef.current) {
             setError(reason);
-            setRawStatus('Raw GPS error');
+            setProbeStatus('Foreground probe error');
           }
         },
       );
 
-      rawSubscriptionRef.current = subscription;
-      rawRef.current = true;
-      await loadDiagnostics();
+      foregroundProbeSubscriptionRef.current = subscription;
+      foregroundProbeRef.current = true;
+      await loadProbeSummary();
       if (mountedRef.current) {
-        setRawRunning(true);
-        setRawStatus('Raw waiting for fix');
+        setForegroundProbeRunning(true);
+        setProbeStatus('Foreground probe waiting');
       }
     } catch (e) {
-      rawRef.current = false;
+      foregroundProbeSubscriptionRef.current?.remove();
+      foregroundProbeSubscriptionRef.current = null;
+      if (sessionId !== null) {
+        await endProbeSession(sessionId, 'start_failed');
+      }
+      probeSessionIdRef.current = null;
+      foregroundProbeRef.current = false;
       if (mountedRef.current) {
-        setRawRunning(false);
+        setForegroundProbeRunning(false);
         setError(formatLocationError(e));
-        setRawStatus('Raw unavailable');
+        setProbeStatus('Foreground probe unavailable');
+      }
+    } finally {
+      busyRef.current = false;
+      if (mountedRef.current) {
+        setBusy(false);
+      }
+    }
+  }
+
+  async function startBackgroundProbe(): Promise<void> {
+    if (
+      busyRef.current ||
+      recordingRef.current ||
+      exportingRef.current ||
+      foregroundProbeRef.current ||
+      backgroundProbeRef.current
+    ) {
+      return;
+    }
+
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    setProbeStatus('Checking background probe...');
+
+    try {
+      await requestBackgroundRecordingPermissions();
+      const sessionId = await startBackgroundProbeTask({
+        permissionsGranted: true,
+      });
+      probeSessionIdRef.current = sessionId;
+      backgroundProbeRef.current = true;
+      await loadProbeSummary();
+      if (mountedRef.current) {
+        setBackgroundProbeRunning(true);
+        setProbeStatus('Background probe recording');
+      }
+    } catch (e) {
+      probeSessionIdRef.current = null;
+      backgroundProbeRef.current = false;
+      if (mountedRef.current) {
+        setBackgroundProbeRunning(false);
+        setError(formatLocationError(e));
+        setProbeStatus('Background probe unavailable');
+      }
+    } finally {
+      busyRef.current = false;
+      if (mountedRef.current) {
+        setBusy(false);
+      }
+    }
+  }
+
+  async function stopProbe(): Promise<void> {
+    if (busyRef.current || exportingRef.current) {
+      return;
+    }
+
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+
+    try {
+      foregroundProbeSubscriptionRef.current?.remove();
+      foregroundProbeSubscriptionRef.current = null;
+      if (backgroundProbeRef.current || (await isBackgroundRecording())) {
+        await stopBackgroundProbeTask();
+      }
+      if (foregroundProbeRef.current) {
+        await endProbeSession(probeSessionIdRef.current, 'stopped');
+      }
+      foregroundProbeRef.current = false;
+      backgroundProbeRef.current = false;
+      await refreshVisibleData();
+      if (mountedRef.current) {
+        setForegroundProbeRunning(false);
+        setBackgroundProbeRunning(false);
+        setProbeStatus('Probe stopped');
+      }
+    } catch (e) {
+      if (mountedRef.current) {
+        setError(formatLocationError(e));
+        setProbeStatus('Probe stop failed');
       }
     } finally {
       busyRef.current = false;
@@ -407,6 +542,31 @@ export function MapTestScreen() {
     }
   }
 
+  async function exportProbe(): Promise<void> {
+    if (busyRef.current || exportingRef.current || exportingProbe) {
+      return;
+    }
+
+    setExportingProbe(true);
+    setError(null);
+    try {
+      await exportProbeLog(probeSessionIdRef.current ?? probeSummary?.id);
+    } catch (e) {
+      if (mountedRef.current) {
+        const message = formatLocationError(e);
+        setError(
+          /another share|being processed/i.test(message)
+            ? 'A share is still open - close it, then tap Export Probe again'
+            : message,
+        );
+      }
+    } finally {
+      if (mountedRef.current) {
+        setExportingProbe(false);
+      }
+    }
+  }
+
   const routeFeature = useMemo<Feature<LineString>>(() => {
     const rawPoints = trackPointsToLngLat(points);
     const renderCoords = transformLineString(
@@ -438,25 +598,22 @@ export function MapTestScreen() {
       ? ` err ${diagnostics.backgroundLastError}`
       : '';
     const rejectText = diagnostics.backgroundLastRejectReason
-      ? ` last reject ${diagnostics.backgroundLastRejectReason}`
+      ? ` reject ${diagnostics.backgroundLastRejectReason}`
       : '';
-    return `BG ${diagnostics.backgroundAcceptedCount}/${diagnostics.backgroundReceivedCount} accepted - last ${formatClock(last)}${rejectText}${errorText}`;
+    return `Record ${diagnostics.backgroundAcceptedCount}/${diagnostics.backgroundReceivedCount} accepted - last ${formatClock(last)}${rejectText}${errorText}`;
   }, [diagnostics]);
 
-  const rawLine = useMemo(() => {
-    const errorText = diagnostics.rawLastError
-      ? ` err ${diagnostics.rawLastError}`
-      : '';
-    return `Raw ${diagnostics.rawReceivedCount} fixes - last ${formatClock(
-      diagnostics.rawLastFixTs,
-    )} acc ${formatAccuracy(diagnostics.rawLastAccuracy)}${errorText}`;
-  }, [diagnostics]);
+  const probeLine = useMemo(() => formatProbeLine(probeSummary), [probeSummary]);
 
   const hasTrack = points.length >= 2;
-  const recordingButtonDisabled = (busy && !recording) || rawRunning;
-  const rawButtonDisabled = (busy && !rawRunning) || recording || exporting;
+  const probeRunning = foregroundProbeRunning || backgroundProbeRunning;
+  const recordingButtonDisabled = (busy && !recording) || probeRunning;
+  const probeStartDisabled = busy || recording || exporting || probeRunning;
+  const probeStopDisabled = busy || !probeRunning;
   const exportDisabled = busy || recording || exporting || points.length === 0;
-  const profileSwitchDisabled = busy || recording || exporting || rawRunning;
+  const exportProbeDisabled =
+    busy || exportingProbe || probeSummary === null || probeRunning;
+  const profileSwitchDisabled = busy || recording || exporting || probeRunning;
 
   return (
     <View style={styles.container}>
@@ -519,7 +676,8 @@ export function MapTestScreen() {
 
       <View style={styles.validationPanel}>
         <Text style={styles.validationLabel}>{backgroundLine}</Text>
-        <Text style={styles.validationLabel}>{rawLine}</Text>
+        <Text style={styles.validationLabel}>{probeLine}</Text>
+        <Text style={styles.validationLabel}>{probeStatus}</Text>
         <View style={styles.zoomRow}>
           {RECORDING_PROFILE_ORDER.map((profile) => {
             const active = recordingProfile === profile;
@@ -537,7 +695,8 @@ export function MapTestScreen() {
                     !busyRef.current &&
                     !recordingRef.current &&
                     !exportingRef.current &&
-                    !rawRef.current
+                    !foregroundProbeRef.current &&
+                    !backgroundProbeRef.current
                   ) {
                     setRecordingProfile(profile);
                   }
@@ -578,22 +737,47 @@ export function MapTestScreen() {
             );
           })}
         </View>
+        <View style={styles.zoomRow}>
+          <TouchableOpacity
+            disabled={probeStartDisabled}
+            style={[styles.zoomButton, probeStartDisabled && styles.buttonDisabled]}
+            onPress={() => {
+              void startForegroundProbe();
+            }}
+          >
+            <Text style={styles.zoomButtonText}>FG Probe</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            disabled={probeStartDisabled}
+            style={[styles.zoomButton, probeStartDisabled && styles.buttonDisabled]}
+            onPress={() => {
+              void startBackgroundProbe();
+            }}
+          >
+            <Text style={styles.zoomButtonText}>BG Probe</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            disabled={probeStopDisabled}
+            style={[styles.zoomButton, probeStopDisabled && styles.buttonDisabled]}
+            onPress={() => {
+              void stopProbe();
+            }}
+          >
+            <Text style={styles.zoomButtonText}>Stop Probe</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.controls}>
         <TouchableOpacity
-          disabled={rawButtonDisabled}
-          style={[styles.button, rawButtonDisabled && styles.buttonDisabled]}
+          disabled={exportProbeDisabled}
+          style={[styles.button, exportProbeDisabled && styles.buttonDisabled]}
           onPress={() => {
-            if (rawRunning) {
-              void stopRawDiagnostic();
-            } else {
-              void startRawDiagnostic();
-            }
+            void exportProbe();
           }}
         >
           <Text style={styles.buttonText}>
-            {rawRunning ? 'Stop Raw' : 'Raw'}
+            {exportingProbe ? 'Exporting Probe' : 'Export Probe'}
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -604,16 +788,10 @@ export function MapTestScreen() {
           }}
         >
           <Text style={styles.buttonText}>
-            {exporting ? 'Exporting' : 'Export'}
+            {exporting ? 'Exporting' : 'Export GPX'}
           </Text>
         </TouchableOpacity>
       </View>
-
-      {rawRunning && (
-        <View style={[styles.badge, { top: 136 }]}>
-          <Text style={styles.badgeText}>{rawStatus}</Text>
-        </View>
-      )}
     </View>
   );
 }

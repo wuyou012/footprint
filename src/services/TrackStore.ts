@@ -9,7 +9,7 @@ import type { TrackPoint } from './TrackDataSource';
  * Never drop or recreate `track_points` in a local migration.
  */
 const DB_NAME = 'footprint.db';
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -148,6 +148,59 @@ async function migrateToV3(db: SQLite.SQLiteDatabase): Promise<void> {
   `);
 }
 
+async function migrateToV4(db: SQLite.SQLiteDatabase): Promise<void> {
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS probe_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mode TEXT NOT NULL,
+      profile TEXT,
+      start_ts INTEGER NOT NULL,
+      end_ts INTEGER,
+      task_invoked_count INTEGER NOT NULL DEFAULT 0,
+      raw_count INTEGER NOT NULL DEFAULT 0,
+      error_count INTEGER NOT NULL DEFAULT 0,
+      last_received_at INTEGER,
+      last_location_timestamp INTEGER,
+      last_delivery_delay_ms INTEGER,
+      last_accuracy REAL,
+      last_lat REAL,
+      last_lng REAL,
+      last_error TEXT,
+      stop_reason TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS raw_location_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      probe_session_id INTEGER,
+      source TEXT NOT NULL,
+      app_state TEXT,
+      profile TEXT,
+      task_invoked_at INTEGER,
+      received_at INTEGER NOT NULL,
+      location_timestamp INTEGER,
+      delivery_delay_ms INTEGER,
+      location_count_in_batch INTEGER NOT NULL DEFAULT 1,
+      latitude REAL,
+      longitude REAL,
+      accuracy REAL,
+      altitude REAL,
+      speed REAL,
+      heading REAL,
+      is_mocked INTEGER,
+      provider_status_json TEXT,
+      raw_payload_json TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_probe_sessions_start_ts
+      ON probe_sessions (start_ts);
+    CREATE INDEX IF NOT EXISTS idx_raw_location_events_session
+      ON raw_location_events (probe_session_id, received_at);
+    CREATE INDEX IF NOT EXISTS idx_raw_location_events_received_at
+      ON raw_location_events (received_at);
+    PRAGMA user_version = 4;
+  `);
+}
+
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
   await db.execAsync('PRAGMA journal_mode = WAL');
 
@@ -160,6 +213,9 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
   }
   if (version < 3) {
     await migrateToV3(db);
+  }
+  if (version < 4) {
+    await migrateToV4(db);
   }
 }
 
