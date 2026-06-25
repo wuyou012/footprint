@@ -2,7 +2,7 @@ import * as Location from 'expo-location';
 
 import type { TrackPointFilterProfile } from './LocationFilter';
 
-export type RecordingProfile = 'daily' | 'eco';
+export type RecordingProfile = 'high' | 'daily' | 'eco';
 
 export type RecordingProfileConfig = TrackPointFilterProfile & {
   label: string;
@@ -12,31 +12,40 @@ export type RecordingProfileConfig = TrackPointFilterProfile & {
 };
 
 export const DEFAULT_RECORDING_PROFILE: RecordingProfile = 'daily';
-export const RECORDING_PROFILE_ORDER = ['daily', 'eco'] as const;
+export const RECORDING_PROFILE_ORDER = ['high', 'daily', 'eco'] as const;
 
 export const RECORDING_PROFILES: Record<
   RecordingProfile,
   RecordingProfileConfig
 > = {
+  high: {
+    label: 'High',
+    accuracy: Location.Accuracy.High,
+    timeInterval: 2000,
+    distanceInterval: 10,
+    maxAcceptedAccuracyMeters: 100,
+    minDistanceMeters: 8,
+    minIntervalMs: 1000,
+    maxSpeedMetersPerSecond: 70,
+  },
   daily: {
     label: 'Daily',
     accuracy: Location.Accuracy.Balanced,
-    timeInterval: 30000,
-    distanceInterval: 50,
+    timeInterval: 15000,
+    distanceInterval: 25,
     maxAcceptedAccuracyMeters: 200,
-    minDistanceMeters: 30,
-    minIntervalMs: 20000,
+    minDistanceMeters: 25,
+    minIntervalMs: 10000,
     maxSpeedMetersPerSecond: 70,
   },
   eco: {
     label: 'Eco',
-    // TODO(P3.6): compare Balanced vs Low on the P30 before lowering accuracy.
     accuracy: Location.Accuracy.Balanced,
-    timeInterval: 60000,
-    distanceInterval: 100,
+    timeInterval: 45000,
+    distanceInterval: 80,
     maxAcceptedAccuracyMeters: 300,
-    minDistanceMeters: 80,
-    minIntervalMs: 60000,
+    minDistanceMeters: 70,
+    minIntervalMs: 30000,
     maxSpeedMetersPerSecond: 70,
   },
 };

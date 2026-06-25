@@ -4,8 +4,12 @@ import {
   Layer,
   Map,
 } from '@maplibre/maplibre-react-native';
+import {
+  activateKeepAwakeAsync,
+  deactivateKeepAwake,
+} from 'expo-keep-awake';
 import * as Location from 'expo-location';
-import type { Feature, LineString } from 'geojson';
+import type { Feature, FeatureCollection, LineString } from 'geojson';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Text, TouchableOpacity, View } from 'react-native';
 
@@ -14,7 +18,6 @@ import {
   isBackgroundRecording,
   requestBackgroundRecordingPermissions,
   startBackgroundProbe as startBackgroundProbeTask,
-  startBackgroundRecording,
   stopBackgroundProbe as stopBackgroundProbeTask,
   stopBackgroundRecording,
 } from '../services/BackgroundLocation';
@@ -35,21 +38,28 @@ import {
   getMapProvider,
   type BuildingStyleMode,
 } from '../services/MapProvider';
+import { shouldAcceptPoint } from '../services/LocationFilter';
+import { locationToTrackPoint } from '../services/LocationPoint';
 import {
   DEFAULT_RECORDING_PROFILE,
   RECORDING_PROFILE_ORDER,
   RECORDING_PROFILES,
   type RecordingProfile,
+  type RecordingProfileConfig,
 } from '../services/RecordingProfile';
 import {
   createSqliteTrackDataSource,
-  trackPointsToLngLat,
   type TrackPoint,
 } from '../services/TrackDataSource';
 import {
+  appendTrackPoint,
+  finishRecordingSession,
+  getLocalDayKey,
   getLocationDiagnostics,
-  replaceTrackPoints,
-  resetBackgroundDiagnostics,
+  getTimezoneOffsetMin,
+  interruptOpenForegroundRecordingSessions,
+  startRecordingSession,
+  startTrackSegment,
   type LocationDiagnosticSnapshot,
 } from '../services/TrackStore';
 import { styles } from './MapTestScreen.styles';
@@ -62,6 +72,22 @@ const FALLBACK_CENTER: LngLat = [-122.4194, 37.7749];
 const TRACK_ZOOM = 14;
 const ACTIVE_REFRESH_INTERVAL_MS = 8000;
 const FOREGROUND_PROBE_INTERVAL_MS = 5000;
+const FOREGROUND_RECORDING_KEEP_AWAKE_TAG = 'footprint-foreground-recording';
+
+type ForegroundRecordingSession = {
+  sessionId: number;
+  segmentId: number;
+  profile: RecordingProfile;
+  config: RecordingProfileConfig;
+  startedAt: number;
+  localDayKey: string;
+  timezoneOffsetMin: number;
+  receivedCount: number;
+  acceptedCount: number;
+  rejectedCount: number;
+  distanceMeters: number;
+  lastAccepted: TrackPoint | null;
+};
 
 const EMPTY_DIAGNOSTICS: LocationDiagnosticSnapshot = {
   backgroundReceivedCount: 0,
@@ -111,6 +137,17 @@ function formatProbeLine(summary: ProbeSessionSummary | null): string {
   return `Probe #${summary.id} ${summary.mode} raw ${summary.rawCount} task ${summary.taskInvokedCount} last ${formatClock(summary.lastReceivedAt)} delay ${formatDelay(summary.lastDeliveryDelayMs)} acc ${formatAccuracy(summary.lastAccuracy)}`;
 }
 
+async function requestForegroundRecordingPermissions(): Promise<void> {
+  if (!(await Location.hasServicesEnabledAsync())) {
+    throw new Error('Location services are disabled');
+  }
+
+  const permission = await Location.requestForegroundPermissionsAsync();
+  if (!permission.granted) {
+    throw new Error('Foreground location permission denied');
+  }
+}
+
 export function MapTestScreen() {
   const [points, setPoints] = useState<TrackPoint[]>([]);
   const [diagnostics, setDiagnostics] =
@@ -134,6 +171,11 @@ export function MapTestScreen() {
   const probeSessionIdRef = useRef<number | null>(null);
   const foregroundProbeSubscriptionRef =
     useRef<Location.LocationSubscription | null>(null);
+  const foregroundRecordingSubscriptionRef =
+    useRef<Location.LocationSubscription | null>(null);
+  const foregroundRecordingSessionRef =
+    useRef<ForegroundRecordingSession | null>(null);
+  const foregroundRecordingQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [buildingMode, setBuildingMode] = useState<BuildingStyleMode>('2d');
   const [recordingProfile, setRecordingProfile] =
     useState<RecordingProfile>(DEFAULT_RECORDING_PROFILE);
@@ -169,6 +211,10 @@ export function MapTestScreen() {
   }, [loadDiagnostics, loadPoints, loadProbeSummary]);
 
   const syncBackgroundState = useCallback(async (): Promise<void> => {
+    if (foregroundRecordingSessionRef.current !== null) {
+      return;
+    }
+
     const mode = await getActiveBackgroundMode();
     recordingRef.current = mode === 'record';
     backgroundProbeRef.current = mode === 'probe';
@@ -219,6 +265,9 @@ export function MapTestScreen() {
       mountedRef.current = false;
       foregroundProbeSubscriptionRef.current?.remove();
       foregroundProbeSubscriptionRef.current = null;
+      foregroundRecordingSubscriptionRef.current?.remove();
+      foregroundRecordingSubscriptionRef.current = null;
+      void deactivateKeepAwake(FOREGROUND_RECORDING_KEEP_AWAKE_TAG);
     };
   }, [refreshVisibleData, syncBackgroundState]);
 
@@ -256,6 +305,74 @@ export function MapTestScreen() {
     syncBackgroundState,
   ]);
 
+  async function handleForegroundLocation(
+    location: Location.LocationObject,
+  ): Promise<void> {
+    const session = foregroundRecordingSessionRef.current;
+    if (!session) {
+      return;
+    }
+
+    const localDayKey = getLocalDayKey(location.timestamp);
+    const candidate: TrackPoint = {
+      ...locationToTrackPoint(location),
+      sessionId: session.sessionId,
+      segmentId: session.segmentId,
+      source: 'gps',
+      profile: session.profile,
+      localDayKey,
+    };
+    session.receivedCount += 1;
+
+    const decision = shouldAcceptPoint(
+      session.lastAccepted,
+      candidate,
+      session.config,
+    );
+    if (!decision.accept) {
+      session.rejectedCount += 1;
+      if (mountedRef.current) {
+        setRecordingStatus(
+          `${session.config.label} foreground rejected: ${decision.reason}`,
+        );
+      }
+      return;
+    }
+
+    await appendTrackPoint(candidate, {
+      sessionId: session.sessionId,
+      segmentId: session.segmentId,
+      source: 'gps',
+      profile: session.profile,
+      localDayKey,
+    });
+
+    session.acceptedCount += 1;
+    session.distanceMeters += decision.distanceMeters ?? 0;
+    session.lastAccepted = candidate;
+    await loadPoints();
+
+    if (mountedRef.current) {
+      setRecordingStatus(
+        `${session.config.label} foreground ${session.acceptedCount}/${session.receivedCount} accepted`,
+      );
+    }
+  }
+
+  function enqueueForegroundLocation(location: Location.LocationObject): void {
+    foregroundRecordingQueueRef.current =
+      foregroundRecordingQueueRef.current.then(() =>
+        handleForegroundLocation(location),
+      );
+    foregroundRecordingQueueRef.current =
+      foregroundRecordingQueueRef.current.catch((e) => {
+        if (mountedRef.current) {
+          setError(formatLocationError(e));
+          setRecordingStatus('Foreground GPS write failed');
+        }
+      });
+  }
+
   async function stopRecording(): Promise<void> {
     if (busyRef.current || exportingRef.current) {
       return;
@@ -265,7 +382,28 @@ export function MapTestScreen() {
     setBusy(true);
     setError(null);
     try {
-      await stopBackgroundRecording();
+      foregroundRecordingSubscriptionRef.current?.remove();
+      foregroundRecordingSubscriptionRef.current = null;
+      await foregroundRecordingQueueRef.current;
+
+      const session = foregroundRecordingSessionRef.current;
+      if (session) {
+        await finishRecordingSession({
+          sessionId: session.sessionId,
+          segmentId: session.segmentId,
+          endTs: Date.now(),
+          status: 'completed',
+          stopReason: 'stopped',
+          receivedCount: session.receivedCount,
+          rejectedCount: session.rejectedCount,
+          distanceMeters: session.distanceMeters,
+        });
+      } else {
+        await stopBackgroundRecording();
+      }
+
+      await deactivateKeepAwake(FOREGROUND_RECORDING_KEEP_AWAKE_TAG);
+      foregroundRecordingSessionRef.current = null;
       recordingRef.current = false;
       await refreshVisibleData();
       if (mountedRef.current) {
@@ -301,28 +439,87 @@ export function MapTestScreen() {
     setError(null);
     setRecordingStatus(`Checking ${recordingProfileConfig.label} GPS...`);
 
+    let sessionId: number | null = null;
+    let segmentId: number | null = null;
     try {
-      await requestBackgroundRecordingPermissions();
+      await requestForegroundRecordingPermissions();
       await stopBackgroundRecording();
-      await resetBackgroundDiagnostics();
-      await replaceTrackPoints([]);
+      await interruptOpenForegroundRecordingSessions('replaced');
+
+      const startedAt = Date.now();
+      const localDayKey = getLocalDayKey(startedAt);
+      const timezoneOffsetMin = getTimezoneOffsetMin(startedAt);
+      sessionId = await startRecordingSession({
+        profile: recordingProfile,
+        source: 'foreground',
+        startTs: startedAt,
+        localDayKey,
+        timezoneOffsetMin,
+      });
+      segmentId = await startTrackSegment({
+        sessionId,
+        startTs: startedAt,
+        localDayKey,
+      });
+
+      foregroundRecordingSessionRef.current = {
+        sessionId,
+        segmentId,
+        profile: recordingProfile,
+        config: recordingProfileConfig,
+        startedAt,
+        localDayKey,
+        timezoneOffsetMin,
+        receivedCount: 0,
+        acceptedCount: 0,
+        rejectedCount: 0,
+        distanceMeters: 0,
+        lastAccepted: null,
+      };
+
+      await activateKeepAwakeAsync(FOREGROUND_RECORDING_KEEP_AWAKE_TAG);
       if (mountedRef.current) {
-        setPoints([]);
-        setRecordingStatus('Starting background GPS...');
+        setRecordingStatus('Starting foreground GPS...');
       }
 
-      await startBackgroundRecording(recordingProfile, recordingProfileConfig, {
-        permissionsGranted: true,
-      });
+      const subscription = await Location.watchPositionAsync(
+        {
+          accuracy: recordingProfileConfig.accuracy,
+          timeInterval: recordingProfileConfig.timeInterval,
+          distanceInterval: recordingProfileConfig.distanceInterval,
+        },
+        enqueueForegroundLocation,
+        (reason) => {
+          if (mountedRef.current) {
+            setError(reason);
+            setRecordingStatus('Foreground GPS error');
+          }
+        },
+      );
+
+      foregroundRecordingSubscriptionRef.current = subscription;
       recordingRef.current = true;
       await refreshVisibleData();
       if (mountedRef.current) {
         setRecording(true);
         setRecordingStatus(
-          `Background ${recordingProfileConfig.label} recording`,
+          `${recordingProfileConfig.label} foreground recording - keep screen on`,
         );
       }
     } catch (e) {
+      foregroundRecordingSubscriptionRef.current?.remove();
+      foregroundRecordingSubscriptionRef.current = null;
+      await deactivateKeepAwake(FOREGROUND_RECORDING_KEEP_AWAKE_TAG);
+      if (sessionId !== null) {
+        await finishRecordingSession({
+          sessionId,
+          segmentId,
+          endTs: Date.now(),
+          status: 'start_failed',
+          stopReason: 'start_failed',
+        });
+      }
+      foregroundRecordingSessionRef.current = null;
       recordingRef.current = false;
       if (mountedRef.current) {
         setRecording(false);
@@ -567,26 +764,59 @@ export function MapTestScreen() {
     }
   }
 
-  const routeFeature = useMemo<Feature<LineString>>(() => {
-    const rawPoints = trackPointsToLngLat(points);
-    const renderCoords = transformLineString(
-      rawPoints,
-      'WGS84',
-      mapProvider.coordinateSystem,
-    );
+  const routeFeature = useMemo<FeatureCollection<LineString>>(() => {
+    const segments: Array<{ key: string; points: TrackPoint[] }> = [];
+    const segmentIndex = new globalThis.Map<string, TrackPoint[]>();
+
+    points.forEach((point) => {
+      const key =
+        point.segmentId !== null && point.segmentId !== undefined
+          ? `segment-${point.segmentId}`
+          : 'legacy';
+      let segment = segmentIndex.get(key);
+      if (!segment) {
+        segment = [];
+        segmentIndex.set(key, segment);
+        segments.push({ key, points: segment });
+      }
+      segment.push(point);
+    });
+
     return {
-      type: 'Feature',
-      properties: {
-        id: 'p4-track',
-        provider: mapProvider.id,
-        points: points.length,
-      },
-      geometry: { type: 'LineString', coordinates: renderCoords },
+      type: 'FeatureCollection',
+      features: segments
+        .map<Feature<LineString> | null>((segment) => {
+          if (segment.points.length < 2) {
+            return null;
+          }
+
+          const rawPoints = segment.points.map<LngLat>((point) => [
+            point.longitude,
+            point.latitude,
+          ]);
+          const renderCoords = transformLineString(
+            rawPoints,
+            'WGS84',
+            mapProvider.coordinateSystem,
+          );
+          return {
+            type: 'Feature',
+            properties: {
+              id: segment.key,
+              provider: mapProvider.id,
+              points: segment.points.length,
+            },
+            geometry: { type: 'LineString', coordinates: renderCoords },
+          };
+        })
+        .filter((feature): feature is Feature<LineString> => feature !== null),
     };
   }, [points]);
 
   const cameraCenter = useMemo<LngLat>(() => {
-    const coords = routeFeature.geometry.coordinates as LngLat[];
+    const coords = routeFeature.features.flatMap(
+      (feature) => feature.geometry.coordinates as LngLat[],
+    );
     return coords[Math.floor(coords.length / 2)] ?? FALLBACK_CENTER;
   }, [routeFeature]);
 
@@ -605,7 +835,7 @@ export function MapTestScreen() {
 
   const probeLine = useMemo(() => formatProbeLine(probeSummary), [probeSummary]);
 
-  const hasTrack = points.length >= 2;
+  const hasTrack = routeFeature.features.length > 0;
   const probeRunning = foregroundProbeRunning || backgroundProbeRunning;
   const recordingButtonDisabled = (busy && !recording) || probeRunning;
   const probeStartDisabled = busy || recording || exporting || probeRunning;
@@ -646,7 +876,7 @@ export function MapTestScreen() {
             : busy
               ? 'Loading...'
               : `${points.length.toLocaleString()} pts - ${
-                  recording ? 'BG GPS' : 'SQLite'
+                  recording ? 'FG GPS' : 'SQLite'
                 }`}
         </Text>
       </View>
@@ -675,6 +905,9 @@ export function MapTestScreen() {
       </View>
 
       <View style={styles.validationPanel}>
+        <Text style={styles.validationLabel}>
+          Foreground session: screen stays awake; lock screen may pause GPS
+        </Text>
         <Text style={styles.validationLabel}>{backgroundLine}</Text>
         <Text style={styles.validationLabel}>{probeLine}</Text>
         <Text style={styles.validationLabel}>{probeStatus}</Text>

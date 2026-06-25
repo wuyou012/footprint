@@ -13,10 +13,12 @@ export type TrackPoint = {
   speed?: number | null;
   altitude?: number | null;
   heading?: number | null;
+  sessionId?: number | null;
   segmentId?: number | null;
   sourceId?: number | null;
   source?: string | null;
   profile?: string | null;
+  localDayKey?: string | null;
 };
 
 /**

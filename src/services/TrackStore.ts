@@ -9,7 +9,7 @@ import type { TrackPoint } from './TrackDataSource';
  * Never drop or recreate `track_points` in a local migration.
  */
 const DB_NAME = 'footprint.db';
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -201,6 +201,51 @@ async function migrateToV4(db: SQLite.SQLiteDatabase): Promise<void> {
   `);
 }
 
+async function migrateToV5(db: SQLite.SQLiteDatabase): Promise<void> {
+  await addColumnIfMissing(db, 'recording_sessions', 'source', 'source TEXT');
+  await addColumnIfMissing(db, 'recording_sessions', 'status', 'status TEXT');
+  await addColumnIfMissing(
+    db,
+    'recording_sessions',
+    'local_day_key',
+    'local_day_key TEXT',
+  );
+  await addColumnIfMissing(
+    db,
+    'recording_sessions',
+    'timezone_offset_min',
+    'timezone_offset_min INTEGER',
+  );
+
+  await addColumnIfMissing(
+    db,
+    'track_segments',
+    'distance_meters',
+    'distance_meters REAL',
+  );
+  await addColumnIfMissing(
+    db,
+    'track_segments',
+    'local_day_key',
+    'local_day_key TEXT',
+  );
+
+  await addColumnIfMissing(db, 'track_points', 'session_id', 'session_id INTEGER');
+  await addColumnIfMissing(db, 'track_points', 'local_day_key', 'local_day_key TEXT');
+
+  await db.execAsync(`
+    CREATE INDEX IF NOT EXISTS idx_recording_sessions_status
+      ON recording_sessions (status, source, start_ts);
+    CREATE INDEX IF NOT EXISTS idx_recording_sessions_local_day
+      ON recording_sessions (local_day_key, start_ts);
+    CREATE INDEX IF NOT EXISTS idx_track_points_session_ts
+      ON track_points (session_id, ts);
+    CREATE INDEX IF NOT EXISTS idx_track_points_local_day_ts
+      ON track_points (local_day_key, ts);
+    PRAGMA user_version = 5;
+  `);
+}
+
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
   await db.execAsync('PRAGMA journal_mode = WAL');
 
@@ -216,6 +261,9 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
   }
   if (version < 4) {
     await migrateToV4(db);
+  }
+  if (version < 5) {
+    await migrateToV5(db);
   }
 }
 
@@ -472,13 +520,32 @@ type TrackPointRow = {
   speed: number | null;
   altitude: number | null;
   heading: number | null;
+  session_id: number | null;
   segment_id: number | null;
   source_id: number | null;
   source: string | null;
   profile: string | null;
+  local_day_key: string | null;
 };
 
 export const MAX_TRACK_QUERY = 20000;
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+export function getLocalDayKey(timestamp: number = Date.now()): string {
+  const date = new Date(timestamp);
+  return [
+    date.getFullYear(),
+    pad2(date.getMonth() + 1),
+    pad2(date.getDate()),
+  ].join('-');
+}
+
+export function getTimezoneOffsetMin(timestamp: number = Date.now()): number {
+  return -new Date(timestamp).getTimezoneOffset();
+}
 
 export async function getTrackPoints(limit: number): Promise<TrackPoint[]> {
   const safeLimit = Number.isFinite(limit)
@@ -487,7 +554,7 @@ export async function getTrackPoints(limit: number): Promise<TrackPoint[]> {
   const db = await getDatabase();
   const rows = await db.getAllAsync<TrackPointRow>(
     `SELECT lng, lat, ts, accuracy, speed, altitude, heading,
-      segment_id, source_id, source, profile
+      session_id, segment_id, source_id, source, profile, local_day_key
      FROM track_points
      ORDER BY ts ASC
      LIMIT ?`,
@@ -501,10 +568,12 @@ export async function getTrackPoints(limit: number): Promise<TrackPoint[]> {
     speed: r.speed,
     altitude: r.altitude,
     heading: r.heading,
+    sessionId: r.session_id,
     segmentId: r.segment_id,
     sourceId: r.source_id,
     source: r.source,
     profile: r.profile,
+    localDayKey: r.local_day_key,
   }));
 }
 
@@ -517,10 +586,12 @@ function rowToTrackPoint(r: TrackPointRow): TrackPoint {
     speed: r.speed,
     altitude: r.altitude,
     heading: r.heading,
+    sessionId: r.session_id,
     segmentId: r.segment_id,
     sourceId: r.source_id,
     source: r.source,
     profile: r.profile,
+    localDayKey: r.local_day_key,
   };
 }
 
@@ -528,7 +599,7 @@ export async function getLastTrackPoint(): Promise<TrackPoint | null> {
   const db = await getDatabase();
   const row = await db.getFirstAsync<TrackPointRow>(
     `SELECT lng, lat, ts, accuracy, speed, altitude, heading,
-      segment_id, source_id, source, profile
+      session_id, segment_id, source_id, source, profile, local_day_key
      FROM track_points
      ORDER BY ts DESC
      LIMIT 1`,
@@ -539,8 +610,10 @@ export async function getLastTrackPoint(): Promise<TrackPoint | null> {
 export type AppendTrackPointOptions = {
   profile?: string | null;
   source?: string | null;
+  sessionId?: number | null;
   segmentId?: number | null;
   sourceId?: number | null;
+  localDayKey?: string | null;
 };
 
 export async function appendTrackPoint(
@@ -552,8 +625,8 @@ export async function appendTrackPoint(
     await txn.runAsync(
       `INSERT INTO track_points (
         lng, lat, ts, accuracy, speed, altitude, heading,
-        segment_id, source_id, source, profile
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        session_id, segment_id, source_id, source, profile, local_day_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         point.longitude,
         point.latitude,
@@ -562,13 +635,188 @@ export async function appendTrackPoint(
         point.speed ?? null,
         point.altitude ?? null,
         point.heading ?? null,
+        options.sessionId ?? point.sessionId ?? null,
         options.segmentId ?? point.segmentId ?? null,
         options.sourceId ?? point.sourceId ?? null,
         options.source ?? point.source ?? 'gps',
         options.profile ?? point.profile ?? null,
+        options.localDayKey ?? point.localDayKey ?? getLocalDayKey(point.timestamp),
       ],
     );
   });
+}
+
+export type RecordingSessionStatus =
+  | 'recording'
+  | 'completed'
+  | 'interrupted'
+  | 'start_failed';
+
+export type StartRecordingSessionInput = {
+  profile: string;
+  source: 'foreground' | 'background';
+  startTs?: number;
+  localDayKey?: string;
+  timezoneOffsetMin?: number;
+};
+
+export async function startRecordingSession(
+  input: StartRecordingSessionInput,
+): Promise<number> {
+  const db = await getDatabase();
+  const startTs = input.startTs ?? Date.now();
+  const localDayKey = input.localDayKey ?? getLocalDayKey(startTs);
+  const timezoneOffsetMin =
+    input.timezoneOffsetMin ?? getTimezoneOffsetMin(startTs);
+  const result = await db.runAsync(
+    `INSERT INTO recording_sessions (
+      profile, start_ts, source, status, local_day_key, timezone_offset_min,
+      created_ts
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.profile,
+      startTs,
+      input.source,
+      'recording',
+      localDayKey,
+      timezoneOffsetMin,
+      Date.now(),
+    ],
+  );
+  return result.lastInsertRowId;
+}
+
+export type StartTrackSegmentInput = {
+  sessionId: number;
+  startTs?: number;
+  localDayKey?: string;
+};
+
+export async function startTrackSegment(
+  input: StartTrackSegmentInput,
+): Promise<number> {
+  const db = await getDatabase();
+  const startTs = input.startTs ?? Date.now();
+  const result = await db.runAsync(
+    `INSERT INTO track_segments (
+      session_id, start_ts, local_day_key, point_count
+    ) VALUES (?, ?, ?, 0)`,
+    [input.sessionId, startTs, input.localDayKey ?? getLocalDayKey(startTs)],
+  );
+  return result.lastInsertRowId;
+}
+
+type RecordingSessionPointStats = {
+  point_count: number;
+  first_ts: number | null;
+  last_ts: number | null;
+};
+
+async function getRecordingSessionPointStats(
+  db: SQLite.SQLiteDatabase,
+  sessionId: number,
+): Promise<RecordingSessionPointStats> {
+  const row = await db.getFirstAsync<RecordingSessionPointStats>(
+    `SELECT
+      COUNT(*) AS point_count,
+      MIN(ts) AS first_ts,
+      MAX(ts) AS last_ts
+     FROM track_points
+     WHERE session_id = ?`,
+    [sessionId],
+  );
+  return row ?? { point_count: 0, first_ts: null, last_ts: null };
+}
+
+export type FinishRecordingSessionInput = {
+  sessionId: number;
+  segmentId?: number | null;
+  endTs?: number;
+  status?: Exclude<RecordingSessionStatus, 'recording'>;
+  stopReason?: string;
+  receivedCount?: number;
+  rejectedCount?: number;
+  distanceMeters?: number | null;
+};
+
+export async function finishRecordingSession(
+  input: FinishRecordingSessionInput,
+): Promise<void> {
+  const db = await getDatabase();
+  const stats = await getRecordingSessionPointStats(db, input.sessionId);
+  const endTs = input.endTs ?? stats.last_ts ?? Date.now();
+  const pointCount = stats.point_count;
+  const receivedCount = Math.max(input.receivedCount ?? pointCount, pointCount);
+  const rejectedCount = input.rejectedCount ?? 0;
+  const status = input.status ?? 'completed';
+  const distanceMeters = input.distanceMeters ?? null;
+
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    if (input.segmentId !== null && input.segmentId !== undefined) {
+      await txn.runAsync(
+        `UPDATE track_segments
+         SET end_ts = ?,
+           point_count = (
+             SELECT COUNT(*) FROM track_points WHERE segment_id = ?
+           ),
+           distance_meters = ?
+         WHERE id = ?`,
+        [endTs, input.segmentId, distanceMeters, input.segmentId],
+      );
+    } else {
+      await txn.runAsync(
+        `UPDATE track_segments
+         SET end_ts = COALESCE(end_ts, ?),
+           point_count = (
+             SELECT COUNT(*) FROM track_points WHERE segment_id = track_segments.id
+           )
+         WHERE session_id = ?`,
+        [endTs, input.sessionId],
+      );
+    }
+
+    await txn.runAsync(
+      `UPDATE recording_sessions
+       SET end_ts = ?,
+         status = ?,
+         stop_reason = ?,
+         received_count = ?,
+         accepted_count = ?,
+         rejected_count = ?,
+         distance_meters = ?
+       WHERE id = ?`,
+      [
+        endTs,
+        status,
+        input.stopReason ?? status,
+        receivedCount,
+        pointCount,
+        rejectedCount,
+        distanceMeters,
+        input.sessionId,
+      ],
+    );
+  });
+}
+
+export async function interruptOpenForegroundRecordingSessions(
+  stopReason: string = 'replaced',
+): Promise<void> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<{ id: number }>(
+    `SELECT id
+     FROM recording_sessions
+     WHERE source = 'foreground' AND status = 'recording'`,
+  );
+  const endTs = Date.now();
+  for (const row of rows) {
+    await finishRecordingSession({
+      sessionId: row.id,
+      endTs,
+      status: 'interrupted',
+      stopReason,
+    });
+  }
 }
 
 const COLUMNS_PER_ROW = 3;
