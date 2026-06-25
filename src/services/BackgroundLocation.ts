@@ -30,7 +30,8 @@ import {
 export const BACKGROUND_LOCATION_TASK = 'footprint-background-location';
 
 const PROBE_PROFILE = 'probe_bg';
-const PROBE_TIME_INTERVAL_MS = 10000;
+const PROBE_TIME_INTERVAL_MS = 5000;
+const PROBE_ACCURACY = Location.Accuracy.BestForNavigation;
 
 type BackgroundLocationTaskData = {
   locations?: Location.LocationObject[];
@@ -77,7 +78,6 @@ async function handleProbeLocations(
   probeSessionId: number | null,
 ): Promise<void> {
   const taskInvokedAt = Date.now();
-  await incrementProbeTaskInvocation(probeSessionId);
 
   for (const location of locations) {
     await recordRawLocationEvent({
@@ -129,6 +129,10 @@ if (!TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {
     async ({ data, error }) => {
       const { mode, probeSessionId } = await resolveTaskMode();
 
+      if (mode === 'probe') {
+        await incrementProbeTaskInvocation(probeSessionId);
+      }
+
       if (error) {
         if (mode === 'probe') {
           await recordProbeError(probeSessionId, error.message);
@@ -141,6 +145,9 @@ if (!TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {
       try {
         const locations = getLocations(data);
         if (locations.length === 0) {
+          if (mode === 'probe') {
+            await recordProbeError(probeSessionId, 'empty_location_batch');
+          }
           return;
         }
 
@@ -257,13 +264,13 @@ export async function startBackgroundProbe(
 
   try {
     await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
-      accuracy: Location.Accuracy.Balanced,
+      accuracy: PROBE_ACCURACY,
       timeInterval: PROBE_TIME_INTERVAL_MS,
       distanceInterval: 0,
       pausesUpdatesAutomatically: false,
       foregroundService: {
         notificationTitle: 'footprint probe is recording',
-        notificationBody: 'Collecting raw background GPS diagnostics',
+        notificationBody: 'Collecting high-accuracy raw background GPS diagnostics',
         notificationColor: '#0F766E',
       },
     });
