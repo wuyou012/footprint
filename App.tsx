@@ -1,11 +1,11 @@
 import { StatusBar } from 'expo-status-bar';
 
-import { MapTestScreen } from './src/screens/MapTestScreen';
+import { RecordScreen } from './src/screens/RecordScreen';
 
 export default function App() {
   return (
     <>
-      <MapTestScreen />
+      <RecordScreen />
       <StatusBar style="auto" />
     </>
   );

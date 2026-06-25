@@ -6,6 +6,8 @@ export type RecordingProfile = 'high' | 'daily' | 'eco';
 
 export type RecordingProfileConfig = TrackPointFilterProfile & {
   label: string;
+  /** Short product-facing copy shown on the mode-selection card. */
+  description: string;
   accuracy: Location.LocationAccuracy;
   timeInterval: number;
   distanceInterval: number;
@@ -20,6 +22,7 @@ export const RECORDING_PROFILES: Record<
 > = {
   high: {
     label: 'High',
+    description: 'Finer track, higher battery. Best for short walks.',
     accuracy: Location.Accuracy.High,
     timeInterval: 2000,
     distanceInterval: 10,
@@ -30,6 +33,7 @@ export const RECORDING_PROFILES: Record<
   },
   daily: {
     label: 'Daily',
+    description: 'Balanced for city walks & commutes. Recommended.',
     accuracy: Location.Accuracy.Balanced,
     timeInterval: 15000,
     distanceInterval: 25,
@@ -40,6 +44,7 @@ export const RECORDING_PROFILES: Record<
   },
   eco: {
     label: 'Eco',
+    description: 'Saves battery, coarser track. May skip small turns.',
     accuracy: Location.Accuracy.Balanced,
     timeInterval: 45000,
     distanceInterval: 80,
