@@ -68,3 +68,8 @@ export function formatRelativeTime(
   const hours = Math.floor(minutes / 60);
   return `${hours}h ago`;
 }
+
+/** Normalise any thrown value to a displayable string. */
+export function formatError(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}

@@ -8,7 +8,6 @@ import { locationToTrackPoint } from '../services/LocationPoint';
 import {
   RECORDING_PROFILES,
   type RecordingProfile,
-  type RecordingProfileConfig,
 } from '../services/RecordingProfile';
 import {
   createSqliteTrackDataSource,
@@ -23,25 +22,17 @@ import {
   startRecordingSession,
   startTrackSegment,
 } from '../services/TrackStore';
+import { formatError } from '../utils/format';
+import {
+  requestForegroundPermission,
+  type ActiveSession,
+} from './recordingSession';
 import { IDLE_STATS, type RecordingStats } from './recordingStats';
 
 const trackSource = createSqliteTrackDataSource();
 const LOAD_CAP = 20000;
 const KEEP_AWAKE_TAG = 'footprint-foreground-recording';
 const STATS_TICK_MS = 1000;
-
-type ActiveSession = {
-  sessionId: number;
-  segmentId: number;
-  profile: RecordingProfile;
-  config: RecordingProfileConfig;
-  startedAt: number;
-  receivedCount: number;
-  acceptedCount: number;
-  rejectedCount: number;
-  distanceMeters: number;
-  lastAccepted: TrackPoint | null;
-};
 
 export type UseForegroundRecording = {
   recording: boolean;
@@ -54,20 +45,6 @@ export type UseForegroundRecording = {
   stop: () => Promise<void>;
   reload: () => Promise<void>;
 };
-
-function formatError(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
-async function requestForegroundPermission(): Promise<void> {
-  if (!(await Location.hasServicesEnabledAsync())) {
-    throw new Error('Location services are disabled');
-  }
-  const permission = await Location.requestForegroundPermissionsAsync();
-  if (!permission.granted) {
-    throw new Error('Foreground location permission denied');
-  }
-}
 
 /**
  * Owns the foreground recording lifecycle: GPS subscription, session/segment
