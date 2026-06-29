@@ -17,12 +17,16 @@ const SCREEN_ON_HINT =
   'Screen-on recording: this is an active, screen-awake session. ' +
   'Locking the screen may pause GPS. All-day background recording comes later.';
 
+type RecordScreenProps = {
+  onOpenHistory?: () => void;
+};
+
 /**
  * F2 product home: a foreground recording screen built from the F0/F1 logic.
  * No mock seeding, no debug probes, no city-jump/test buttons — just record,
  * see your track, switch modes, drop into a low-power view, and export.
  */
-export function RecordScreen() {
+export function RecordScreen({ onOpenHistory }: RecordScreenProps) {
   const rec = useForegroundRecording();
   const [profile, setProfile] = useState<RecordingProfile>(
     DEFAULT_RECORDING_PROFILE,
@@ -87,6 +91,15 @@ export function RecordScreen() {
             {rec.busy ? 'Loading…' : badge}
           </Text>
         </View>
+        {onOpenHistory && !rec.recording && (
+          <TouchableOpacity
+            style={styles.historyButton}
+            disabled={rec.busy}
+            onPress={onOpenHistory}
+          >
+            <Text style={styles.historyText}>History</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       <View style={styles.bottomOverlay} pointerEvents="box-none">
@@ -155,7 +168,10 @@ const styles = StyleSheet.create({
     right: 0,
     paddingTop: 52,
     paddingHorizontal: 16,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'flex-start',
+    gap: 12,
   },
   badge: {
     backgroundColor: 'rgba(17, 24, 39, 0.82)',
@@ -168,6 +184,17 @@ const styles = StyleSheet.create({
     color: '#F9FAFB',
     fontSize: 13,
     fontWeight: '600',
+  },
+  historyButton: {
+    backgroundColor: 'rgba(17, 24, 39, 0.82)',
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+  },
+  historyText: {
+    color: '#F9FAFB',
+    fontSize: 13,
+    fontWeight: '700',
   },
   bottomOverlay: {
     position: 'absolute',

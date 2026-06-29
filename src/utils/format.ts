@@ -11,6 +11,35 @@ export function formatClock(timestamp: number | null | undefined): string {
   return new Date(timestamp).toLocaleTimeString();
 }
 
+export function formatDayKey(dayKey: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dayKey);
+  if (!match) {
+    return dayKey;
+  }
+
+  const [, year, month, day] = match;
+  const date = new Date(Number(year), Number(month) - 1, Number(day));
+  if (!Number.isFinite(date.getTime())) {
+    return dayKey;
+  }
+
+  return date.toLocaleDateString(undefined, {
+    weekday: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+export function formatClockRange(
+  startTs: number | null | undefined,
+  endTs: number | null | undefined,
+): string {
+  const start = startTs ? formatClock(startTs) : 'unknown';
+  const end = endTs ? formatClock(endTs) : 'ongoing';
+  return `${start} - ${end}`;
+}
+
 export function formatAccuracy(accuracy: number | null | undefined): string {
   return typeof accuracy === 'number' && Number.isFinite(accuracy)
     ? `${Math.round(accuracy)}m`
