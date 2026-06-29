@@ -116,7 +116,12 @@ export async function getSessionsForDay(dayKey: string): Promise<DaySession[]> {
   }));
 }
 
-/** All accepted points for a day (for the Day Detail map), oldest first. */
+/**
+ * All accepted points belonging to a day's sessions (for the Day Detail map),
+ * oldest first. Keyed by session-start day (via session_id), NOT by each
+ * point's own day, so a session crossing local midnight stays whole and matches
+ * getSessionsForDay / export / deleteDay exactly.
+ */
 export async function getTrackPointsForDay(
   dayKey: string,
 ): Promise<TrackPoint[]> {
@@ -125,7 +130,10 @@ export async function getTrackPointsForDay(
     `SELECT lng, lat, ts, accuracy, speed, altitude, heading,
        session_id, segment_id, source_id, source, profile, local_day_key
      FROM track_points
-     WHERE local_day_key = ?
+     WHERE session_id IN (
+       SELECT id FROM recording_sessions
+       WHERE local_day_key = ? AND ${PRODUCT_SESSION_FILTER}
+     )
      ORDER BY ts ASC
      LIMIT ?`,
     [dayKey, MAX_DAY_POINTS],
@@ -148,30 +156,30 @@ export async function getTrackPointsForDay(
 }
 
 /**
- * Delete one local day's recordings (points + segments + sessions). This is the
- * ONLY sanctioned data-deletion path and is strictly user-initiated (the UI
- * must confirm first). Wrapped in a transaction so it is all-or-nothing; other
- * days are untouched.
- *
- * Known edge: a session spanning local midnight is keyed by its start day, so
- * deleting that day removes the session while points captured after midnight
- * (their own day key) are removed by the points clause — acceptable for the
- * short screen-on sessions F2/F3 target.
+ * Delete one local day's recordings — the points, segments, and sessions of
+ * every foreground session whose START day is `dayKey`. The ONLY sanctioned
+ * deletion path, strictly user-initiated (the UI must confirm first). Wrapped
+ * in a transaction so it is all-or-nothing, and scoped by session id so a
+ * session crossing local midnight is deleted as one unit (no orphaned
+ * after-midnight points). Other days — and legacy points with no session — are
+ * untouched.
  */
 export async function deleteDay(dayKey: string): Promise<void> {
   const db = await getDatabase();
+  const daySessionIds = `SELECT id FROM recording_sessions
+       WHERE local_day_key = ? AND ${PRODUCT_SESSION_FILTER}`;
   await db.withTransactionAsync(async () => {
     await db.runAsync(
-      `DELETE FROM track_segments WHERE session_id IN (
-         SELECT id FROM recording_sessions WHERE local_day_key = ?
-       )`,
+      `DELETE FROM track_points WHERE session_id IN (${daySessionIds})`,
       [dayKey],
     );
-    await db.runAsync(`DELETE FROM track_points WHERE local_day_key = ?`, [
-      dayKey,
-    ]);
     await db.runAsync(
-      `DELETE FROM recording_sessions WHERE local_day_key = ?`,
+      `DELETE FROM track_segments WHERE session_id IN (${daySessionIds})`,
+      [dayKey],
+    );
+    await db.runAsync(
+      `DELETE FROM recording_sessions
+       WHERE local_day_key = ? AND ${PRODUCT_SESSION_FILTER}`,
       [dayKey],
     );
   });
