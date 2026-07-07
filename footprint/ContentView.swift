@@ -1,21 +1,39 @@
-//
-//  ContentView.swift
-//  footprint
-//
-//  Created by wuyou on 3/7/2026.
-//
-
 import SwiftUI
 
+enum AppRoute: Equatable {
+    case record
+    case history
+    case dayDetail(String)
+}
+
 struct ContentView: View {
+    @StateObject private var recorder = RecordingManager()
+    @State private var route: AppRoute = .record
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        switch route {
+        case .record:
+            RecordView(
+                recorder: recorder,
+                onOpenHistory: { route = .history }
+            )
+        case .history:
+            HistoryView(
+                onBack: { route = .record },
+                onSelectDay: { dayKey in route = .dayDetail(dayKey) }
+            )
+        case .dayDetail(let dayKey):
+            DayDetailView(
+                dayKey: dayKey,
+                onBack: { route = .history },
+                onDeleted: {
+                    Task {
+                        await recorder.reload()
+                        route = .history
+                    }
+                }
+            )
         }
-        .padding()
     }
 }
 
