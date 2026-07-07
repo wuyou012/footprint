@@ -6,13 +6,15 @@ struct DayDetailView: View {
     let onDeleted: () -> Void
 
     @State private var sessions: [DaySession] = []
-    @State private var points: [TrackPoint] = []
+    @State private var mapPoints: [TrackPoint] = []
     @State private var loading = true
     @State private var exporting = false
     @State private var deleting = false
     @State private var errorMessage: String?
     @State private var shareItem: ShareItem?
     @State private var showDeleteConfirmation = false
+    @State private var mapStyle: FootprintMapStyle = .standard
+    @State private var trackTint: TrackTint = .lagoon
 
     var body: some View {
         NavigationStack {
@@ -23,7 +25,20 @@ struct DayDetailView: View {
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
-                            TrackMapView(points: points)
+                            HStack {
+                                Text("\(pointCount.formatted()) points")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                MapOptionsMenu(mapStyle: $mapStyle, trackTint: $trackTint)
+                                    .buttonStyle(.bordered)
+                            }
+
+                            TrackMapView(
+                                points: mapPoints,
+                                mapStyle: mapStyle,
+                                appearance: historyAppearance
+                            )
                                 .frame(height: 280)
                                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
@@ -33,7 +48,7 @@ struct DayDetailView: View {
                                         .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(.borderedProminent)
-                                .disabled(actionDisabled || points.isEmpty)
+                                .disabled(actionDisabled || pointCount == 0)
 
                                 Button(role: .destructive) {
                                     showDeleteConfirmation = true
@@ -100,12 +115,20 @@ struct DayDetailView: View {
         }
     }
 
-    private var totalDistance: Double {
-        sessions.reduce(0) { $0 + $1.distanceMeters }
+    private var pointCount: Int {
+        sessions.reduce(0) { $0 + $1.pointCount }
     }
 
     private var actionDisabled: Bool {
         loading || exporting || deleting
+    }
+
+    private var historyAppearance: TrackMapAppearance {
+        var appearance = trackTint.appearance
+        appearance.lineWidth = 3.5
+        appearance.showsTrackPoints = mapPoints.count <= 2_000
+        appearance.maxPointMarkers = 400
+        return appearance
     }
 
     private func load() {
@@ -113,7 +136,7 @@ struct DayDetailView: View {
         errorMessage = nil
         do {
             sessions = try TrackDatabase.shared.loadSessions(for: dayKey)
-            points = try TrackDatabase.shared.loadTrackPoints(for: dayKey)
+            mapPoints = try TrackDatabase.shared.loadTrackPoints(for: dayKey, limit: 8_000)
         } catch {
             errorMessage = AppFormatters.errorMessage(error)
         }
@@ -121,11 +144,11 @@ struct DayDetailView: View {
     }
 
     private func exportDay() {
-        guard !actionDisabled, !points.isEmpty else { return }
+        guard !actionDisabled, pointCount > 0 else { return }
         exporting = true
         errorMessage = nil
         do {
-            shareItem = ShareItem(url: try GPXExporter.write(points: points))
+            shareItem = ShareItem(url: try GPXExporter.write(dayKey: dayKey))
         } catch {
             errorMessage = AppFormatters.errorMessage(error)
         }

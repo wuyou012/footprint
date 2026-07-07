@@ -52,6 +52,8 @@ final class TrackDatabase {
 
     private func migrate() throws {
         try execute("PRAGMA journal_mode = WAL")
+        try execute("PRAGMA synchronous = NORMAL")
+        try execute("PRAGMA temp_store = MEMORY")
         try execute("""
             CREATE TABLE IF NOT EXISTS track_points (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -216,8 +218,12 @@ final class TrackDatabase {
         )
     }
 
+    func trackPointCount() throws -> Int {
+        try scalarInt("SELECT COUNT(*) FROM track_points")
+    }
+
     func loadTrackPoints(limit: Int = 20_000) throws -> [TrackPoint] {
-        let safeLimit = max(0, min(20_000, limit))
+        let safeLimit = max(0, min(50_000, limit))
         return try query("""
             SELECT id, lng, lat, ts, accuracy, speed, altitude, heading,
               session_id, segment_id, source, profile, local_day_key
@@ -225,6 +231,38 @@ final class TrackDatabase {
             ORDER BY ts ASC
             LIMIT ?
             """, [safeLimit], map: point)
+    }
+
+    func loadRecentTrackPoints(limit: Int = 3_000) throws -> [TrackPoint] {
+        let safeLimit = max(0, min(20_000, limit))
+        return try query("""
+            SELECT * FROM (
+              SELECT id, lng, lat, ts, accuracy, speed, altitude, heading,
+                session_id, segment_id, source, profile, local_day_key
+              FROM track_points
+              ORDER BY ts DESC
+              LIMIT ?
+            )
+            ORDER BY ts ASC
+            """, [safeLimit], map: point)
+    }
+
+    func loadLatestSessionTrackPoints(limit: Int = 3_000) throws -> [TrackPoint] {
+        guard let sessionID = try latestTrackSessionID() else {
+            return try loadRecentTrackPoints(limit: limit)
+        }
+        return try loadTrackPoints(forSessionID: sessionID, limit: limit)
+    }
+
+    private func latestTrackSessionID() throws -> Int64? {
+        try query("""
+            SELECT session_id
+            FROM track_points
+            WHERE session_id IS NOT NULL
+            GROUP BY session_id
+            ORDER BY MAX(ts) DESC
+            LIMIT 1
+            """) { sqlite3_column_int64($0, 0) }.first
     }
 
     func loadLastTrackPoint() throws -> TrackPoint? {
@@ -257,6 +295,73 @@ final class TrackDatabase {
                 point.profile?.rawValue,
                 point.localDayKey ?? AppFormatters.localDayKey(for: point.timestampMs)
             ])
+    }
+
+    func loadTrackPoints(forSessionID sessionID: Int64, limit: Int = 20_000) throws -> [TrackPoint] {
+        let safeLimit = max(0, min(50_000, limit))
+        let totalCount = try trackPointCount(forSessionID: sessionID)
+        guard totalCount > safeLimit, safeLimit > 0 else {
+            return try query("""
+                SELECT id, lng, lat, ts, accuracy, speed, altitude, heading,
+                  session_id, segment_id, source, profile, local_day_key
+                FROM track_points
+                WHERE session_id = ?
+                ORDER BY ts ASC
+                LIMIT ?
+                """, [sessionID, safeLimit], map: point)
+        }
+
+        let stride = max(1, (totalCount + safeLimit - 1) / safeLimit)
+        return try query("""
+            WITH filtered AS (
+              SELECT id, lng, lat, ts, accuracy, speed, altitude, heading,
+                session_id, segment_id, source, profile, local_day_key
+              FROM track_points
+              WHERE session_id = ?
+            ),
+            numbered AS (
+              SELECT *,
+                ROW_NUMBER() OVER (ORDER BY ts ASC) AS row_index,
+                COUNT(*) OVER () AS total_count
+              FROM filtered
+            )
+            SELECT id, lng, lat, ts, accuracy, speed, altitude, heading,
+              session_id, segment_id, source, profile, local_day_key
+            FROM numbered
+            WHERE row_index = 1
+              OR row_index = total_count
+              OR ((row_index - 1) % ?) = 0
+            ORDER BY ts ASC
+            LIMIT ?
+            """, [sessionID, stride, safeLimit], map: point)
+    }
+
+    func trackPointCount(forSessionID sessionID: Int64) throws -> Int {
+        try scalarInt("SELECT COUNT(*) FROM track_points WHERE session_id = ?", [sessionID])
+    }
+
+    func forEachTrackPoint(forSessionID sessionID: Int64, body: (TrackPoint) throws -> Void) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try prepare("""
+            SELECT id, lng, lat, ts, accuracy, speed, altitude, heading,
+              session_id, segment_id, source, profile, local_day_key
+            FROM track_points
+            WHERE session_id = ?
+            ORDER BY ts ASC
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(statement, values: [sessionID])
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_ROW {
+                try body(point(from: statement))
+            } else if result == SQLITE_DONE {
+                return
+            } else {
+                throw TrackDatabaseError.stepFailed(errorMessage)
+            }
+        }
     }
 
     func startRecordingSession(profile: RecordingProfile, startMs: Int64) throws -> Int64 {
@@ -411,7 +516,70 @@ final class TrackDatabase {
 
     func loadTrackPoints(for dayKey: String, limit: Int = 50_000) throws -> [TrackPoint] {
         let safeLimit = max(0, min(50_000, limit))
+        let totalCount = try trackPointCount(for: dayKey)
+        guard totalCount > safeLimit, safeLimit > 0 else {
+            return try query("""
+                SELECT id, lng, lat, ts, accuracy, speed, altitude, heading,
+                  session_id, segment_id, source, profile, local_day_key
+                FROM track_points
+                WHERE session_id IN (
+                  SELECT id FROM recording_sessions
+                  WHERE local_day_key = ?
+                    AND source = 'foreground'
+                    AND (status IS NULL OR status != 'start_failed')
+                )
+                ORDER BY ts ASC
+                LIMIT ?
+                """, [dayKey, safeLimit], map: point)
+        }
+
+        let stride = max(1, (totalCount + safeLimit - 1) / safeLimit)
         return try query("""
+            WITH filtered AS (
+              SELECT id, lng, lat, ts, accuracy, speed, altitude, heading,
+                session_id, segment_id, source, profile, local_day_key
+              FROM track_points
+              WHERE session_id IN (
+                SELECT id FROM recording_sessions
+                WHERE local_day_key = ?
+                  AND source = 'foreground'
+                  AND (status IS NULL OR status != 'start_failed')
+              )
+            ),
+            numbered AS (
+              SELECT *,
+                ROW_NUMBER() OVER (ORDER BY ts ASC) AS row_index,
+                COUNT(*) OVER () AS total_count
+              FROM filtered
+            )
+            SELECT id, lng, lat, ts, accuracy, speed, altitude, heading,
+              session_id, segment_id, source, profile, local_day_key
+            FROM numbered
+            WHERE row_index = 1
+              OR row_index = total_count
+              OR ((row_index - 1) % ?) = 0
+            ORDER BY ts ASC
+            LIMIT ?
+            """, [dayKey, stride, safeLimit], map: point)
+    }
+
+    func trackPointCount(for dayKey: String) throws -> Int {
+        try scalarInt("""
+            SELECT COUNT(*)
+            FROM track_points
+            WHERE session_id IN (
+              SELECT id FROM recording_sessions
+              WHERE local_day_key = ?
+                AND source = 'foreground'
+                AND (status IS NULL OR status != 'start_failed')
+            )
+            """, [dayKey])
+    }
+
+    func forEachTrackPoint(for dayKey: String, body: (TrackPoint) throws -> Void) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try prepare("""
             SELECT id, lng, lat, ts, accuracy, speed, altitude, heading,
               session_id, segment_id, source, profile, local_day_key
             FROM track_points
@@ -422,8 +590,19 @@ final class TrackDatabase {
                 AND (status IS NULL OR status != 'start_failed')
             )
             ORDER BY ts ASC
-            LIMIT ?
-            """, [dayKey, safeLimit], map: point)
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(statement, values: [dayKey])
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_ROW {
+                try body(point(from: statement))
+            } else if result == SQLITE_DONE {
+                return
+            } else {
+                throw TrackDatabaseError.stepFailed(errorMessage)
+            }
+        }
     }
 
     func deleteDay(_ dayKey: String) throws {

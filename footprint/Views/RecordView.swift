@@ -9,37 +9,94 @@ struct RecordView: View {
     @State private var exporting = false
     @State private var exportError: String?
     @State private var shareItem: ShareItem?
+    @AppStorage("record.mapTint.red") private var mapTintRed = 84
+    @AppStorage("record.mapTint.green") private var mapTintGreen = 132
+    @AppStorage("record.mapTint.blue") private var mapTintBlue = 255
+    @AppStorage("record.mapTint.strength") private var mapTintStrength = 0.0
+    @AppStorage("record.track.red") private var trackRed = 0
+    @AppStorage("record.track.green") private var trackGreen = 158
+    @AppStorage("record.track.blue") private var trackBlue = 184
+
+    @State private var mapStyle: FootprintMapStyle = .standard
+    @State private var mapDimension: FootprintMapDimension = .twoD
+    @State private var poiVisibility: FootprintPOIVisibility = .shown
+    @State private var showingSettings = false
 
     var body: some View {
-        if recorder.recording && lowPower {
-            LowPowerRecordingView(
-                stats: recorder.stats,
-                modeLabel: selectedProfile.label,
-                onStop: stop,
-                onShowMap: { lowPower = false }
-            )
-        } else {
-            ZStack {
-                TrackMapView(points: recorder.points, followLatest: recorder.recording)
-                    .ignoresSafeArea()
+        Group {
+            if showingSettings {
+                RecordSettingsView(
+                    selectedProfile: $selectedProfile,
+                    mapStyle: $mapStyle,
+                    mapDimension: $mapDimension,
+                    poiVisibility: $poiVisibility,
+                    mapTintColor: mapTintColorBinding,
+                    mapTintStrength: $mapTintStrength,
+                    trackColor: trackColorBinding,
+                    recording: recorder.recording,
+                    backgroundRecordingEnabled: recorder.backgroundRecordingEnabled,
+                    canExport: canExportCurrentTrack,
+                    exporting: exporting,
+                    exportError: exportError,
+                    onBack: { showingSettings = false },
+                    onExport: exportCurrentTrack
+                )
+            } else if recorder.recording && lowPower {
+                LowPowerRecordingView(
+                    stats: recorder.stats,
+                    modeLabel: selectedProfile.label,
+                    onStop: stop,
+                    onShowMap: { lowPower = false }
+                )
+            } else {
+                mapScene
+            }
+        }
+        .sheet(item: $shareItem) { item in
+            ShareSheet(url: item.url)
+        }
+    }
 
-                VStack {
-                    topOverlay
-                    Spacer()
-                    bottomOverlay
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 52)
-                .padding(.bottom, 32)
+    private var mapScene: some View {
+        ZStack {
+            TrackMapView(
+                points: recorder.points,
+                followLatest: recorder.recording,
+                mapStyle: mapStyle,
+                mapDimension: mapDimension,
+                poiVisibility: poiVisibility,
+                mapTintColor: mapTintColor,
+                mapTintStrength: mapTintStrength,
+                appearance: mapAppearance
+            )
+                .ignoresSafeArea()
+
+            VStack {
+                topOverlay
+                Spacer()
+                bottomOverlay
             }
-            .sheet(item: $shareItem) { item in
-                ShareSheet(url: item.url)
-            }
+            .padding(.horizontal, 16)
+            .padding(.top, 52)
+            .padding(.bottom, 32)
         }
     }
 
     private var topOverlay: some View {
         HStack(alignment: .top, spacing: 12) {
+            Button {
+                showingSettings = true
+            } label: {
+                Image(systemName: "line.3.horizontal")
+                    .font(.headline.weight(.bold))
+                    .frame(width: 44, height: 34)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .background(Color.black.opacity(0.72))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .accessibilityLabel("Settings")
+
             Text(recorder.busy ? "Loading..." : badgeText)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
@@ -98,9 +155,8 @@ struct RecordView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
             } else {
-                ModeSelector(selection: $selectedProfile, disabled: recorder.busy)
                 Button(action: start) {
-                    Label("Start recording", systemImage: "location.fill")
+                    Label("Start \(selectedProfile.label)", systemImage: "location.fill")
                         .font(.headline.weight(.bold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 16)
@@ -111,31 +167,61 @@ struct RecordView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .disabled(recorder.busy)
 
-                if !recorder.points.isEmpty {
-                    Button(action: exportCurrentTrack) {
-                        Label(exporting ? "Exporting..." : "Export GPX", systemImage: "square.and.arrow.up")
-                            .font(.headline.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.primary)
-                    .background(Color(.systemGray6).opacity(0.88))
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .disabled(exporting)
-                }
-
-                Text("Screen-on recording: this is an active, screen-awake session. Locking the screen may pause GPS. All-day background recording comes later.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 8)
             }
         }
     }
 
     private var badgeText: String {
-        recorder.errorMessage ?? exportError ?? "\(recorder.points.count.formatted()) points"
+        if let message = recorder.errorMessage ?? exportError {
+            return message
+        }
+        if recorder.recording {
+            return recorder.backgroundRecordingEnabled
+                ? "\(recorder.stats.acceptedCount.formatted()) points · BG"
+                : "\(recorder.stats.acceptedCount.formatted()) points"
+        }
+        return "\(recorder.totalPointCount.formatted()) saved"
+    }
+
+    private var mapAppearance: TrackMapAppearance {
+        var appearance = TrackMapAppearance.custom(trackColor: trackColor)
+        appearance.showsTrackPoints = recorder.recording
+        appearance.lineWidth = recorder.recording ? 4.5 : 3.5
+        return appearance
+    }
+
+    private var mapTintColor: RGBColor {
+        RGBColor(red: mapTintRed, green: mapTintGreen, blue: mapTintBlue)
+    }
+
+    private var trackColor: RGBColor {
+        RGBColor(red: trackRed, green: trackGreen, blue: trackBlue)
+    }
+
+    private var mapTintColorBinding: Binding<RGBColor> {
+        Binding(
+            get: { mapTintColor },
+            set: {
+                mapTintRed = $0.red
+                mapTintGreen = $0.green
+                mapTintBlue = $0.blue
+            }
+        )
+    }
+
+    private var trackColorBinding: Binding<RGBColor> {
+        Binding(
+            get: { trackColor },
+            set: {
+                trackRed = $0.red
+                trackGreen = $0.green
+                trackBlue = $0.blue
+            }
+        )
+    }
+
+    private var canExportCurrentTrack: Bool {
+        recorder.exportableSessionID != nil && !recorder.points.isEmpty && !recorder.recording
     }
 
     private func start() {
@@ -149,11 +235,14 @@ struct RecordView: View {
     }
 
     private func exportCurrentTrack() {
-        guard !exporting, !recorder.recording, !recorder.points.isEmpty else { return }
+        guard !exporting,
+              !recorder.recording,
+              let sessionID = recorder.exportableSessionID
+        else { return }
         exporting = true
         exportError = nil
         do {
-            shareItem = ShareItem(url: try GPXExporter.write(points: recorder.points))
+            shareItem = ShareItem(url: try GPXExporter.write(sessionID: sessionID))
         } catch {
             exportError = AppFormatters.errorMessage(error)
         }

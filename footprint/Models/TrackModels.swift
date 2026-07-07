@@ -66,6 +66,14 @@ enum RecordingProfile: String, CaseIterable, Identifiable {
         }
     }
 
+    var statsRefreshInterval: TimeInterval {
+        switch self {
+        case .high: 1
+        case .daily: 5
+        case .eco: 15
+        }
+    }
+
     var maxSpeedMetersPerSecond: CLLocationSpeed { 70 }
 }
 

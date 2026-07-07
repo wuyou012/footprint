@@ -1,5 +1,33 @@
 import SwiftUI
 
+struct MapOptionsMenu: View {
+    @Binding var mapStyle: FootprintMapStyle
+    @Binding var trackTint: TrackTint
+
+    var body: some View {
+        Menu {
+            Picker("Base map", selection: $mapStyle) {
+                ForEach(FootprintMapStyle.allCases) { style in
+                    Label(style.label, systemImage: style.symbolName)
+                        .tag(style)
+                }
+            }
+            Picker("Track color", selection: $trackTint) {
+                ForEach(TrackTint.allCases) { tint in
+                    Text(tint.label)
+                        .tag(tint)
+                }
+            }
+        } label: {
+            Label("Map", systemImage: "map")
+                .labelStyle(.titleAndIcon)
+                .font(.caption.weight(.bold))
+                .padding(.vertical, 8)
+                .padding(.horizontal, 12)
+        }
+    }
+}
+
 struct ModeSelector: View {
     @Binding var selection: RecordingProfile
     var disabled = false
@@ -17,8 +45,8 @@ struct ModeSelector: View {
                             .padding(.vertical, 10)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(selection == profile ? .white : Color(.systemGray5))
-                    .background(selection == profile ? Color.teal : Color.white.opacity(0.10))
+                    .foregroundStyle(selection == profile ? .white : Color.primary.opacity(0.72))
+                    .background(selection == profile ? Color.teal : Color(.systemGray5).opacity(0.70))
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .opacity(disabled && selection != profile ? 0.4 : 1)
                     .disabled(disabled)
@@ -26,7 +54,7 @@ struct ModeSelector: View {
             }
             Text(selection.description)
                 .font(.caption)
-                .foregroundStyle(Color(.systemGray4))
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(12)
@@ -87,21 +115,23 @@ struct LowPowerRecordingView: View {
                     .frame(width: 10, height: 10)
                 Text("Recording · \(modeLabel)")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.white.opacity(0.68))
             }
 
             Text(AppFormatters.formatDuration(stats.durationSeconds))
                 .font(.system(size: 64, weight: .thin, design: .rounded))
                 .monospacedDigit()
+                .foregroundStyle(.white)
 
             HStack(spacing: 48) {
                 Metric(label: "Distance", value: AppFormatters.formatDistance(stats.distanceMeters))
                 Metric(label: "Points", value: "\(stats.acceptedCount)")
             }
+            .foregroundStyle(.white)
 
             Text("Last fix \(AppFormatters.formatRelativeTime(stats.lastFixMs)) · \(AppFormatters.formatAccuracy(stats.lastAccuracy))")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.68))
 
             HStack(spacing: 14) {
                 Button(role: .destructive, action: onStop) {
@@ -117,17 +147,18 @@ struct LowPowerRecordingView: View {
                         .frame(width: 112)
                 }
                 .buttonStyle(.bordered)
+                .tint(.white)
             }
 
             Text("Screen-on recording. Keep this screen open; locking may pause GPS.")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.55))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(28)
-        .background(Color(.systemBackground))
+        .background(Color.black)
     }
 }
 
@@ -142,7 +173,7 @@ private struct Metric: View {
                 .monospacedDigit()
             Text(label)
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.62))
                 .textCase(.uppercase)
         }
     }

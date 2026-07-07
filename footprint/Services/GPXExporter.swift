@@ -13,6 +13,72 @@ enum GPXExporter {
         return url
     }
 
+    static func write(dayKey: String) throws -> URL {
+        try write(
+            fileName: "footprint-\(dayKey).gpx",
+            name: "footprint \(dayKey)",
+            enumerate: { body in
+                try TrackDatabase.shared.forEachTrackPoint(for: dayKey, body: body)
+            }
+        )
+    }
+
+    static func write(sessionID: Int64) throws -> URL {
+        try write(
+            fileName: "footprint-session-\(sessionID).gpx",
+            name: "footprint session \(sessionID)",
+            enumerate: { body in
+                try TrackDatabase.shared.forEachTrackPoint(forSessionID: sessionID, body: body)
+            }
+        )
+    }
+
+    private static func write(
+        fileName: String,
+        name rawName: String,
+        enumerate: (_ body: (TrackPoint) throws -> Void) throws -> Void
+    ) throws -> URL {
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let url = directory.appendingPathComponent(fileName)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+
+        let createdAt = ISO8601DateFormatter().string(from: Date())
+        let name = escape(rawName)
+        try handle.writeText(header(name: name, createdAt: createdAt))
+
+        var currentSegmentKey: String?
+        var wrotePoint = false
+        try enumerate { point in
+            guard isValid(point) else { return }
+            let segmentKey = point.segmentID.map { "segment-\($0)" } ?? "legacy"
+            if currentSegmentKey != segmentKey {
+                if currentSegmentKey != nil {
+                    try handle.writeText("    </trkseg>\n")
+                }
+                try handle.writeText("    <trkseg>\n")
+                currentSegmentKey = segmentKey
+            }
+            try handle.writeText("\(trackPointXML(point))\n")
+            wrotePoint = true
+        }
+
+        if currentSegmentKey != nil {
+            try handle.writeText("    </trkseg>\n")
+        }
+        try handle.writeText(footer())
+
+        guard wrotePoint else {
+            try? FileManager.default.removeItem(at: url)
+            throw NSError(domain: "footprint.gpx", code: 1, userInfo: [NSLocalizedDescriptionKey: "No valid track points to export"])
+        }
+        return url
+    }
+
     private static func isValid(_ point: TrackPoint) -> Bool {
         point.longitude.isFinite
             && point.latitude.isFinite
@@ -59,6 +125,35 @@ enum GPXExporter {
             "  <trk>",
             "    <name>\(name)</name>",
             segments,
+            "  </trk>",
+            "</gpx>",
+            ""
+        ].joined(separator: "\n")
+    }
+
+    private static func header(name: String, createdAt: String) -> String {
+        [
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+            "<gpx",
+            "  version=\"1.1\"",
+            "  creator=\"footprint\"",
+            "  xmlns=\"http://www.topografix.com/GPX/1/1\"",
+            "  xmlns:footprint=\"https://github.com/wuyou012/footprint/gpx/1\"",
+            "  xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"",
+            "  xsi:schemaLocation=\"http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd\"",
+            ">",
+            "  <metadata>",
+            "    <name>\(name)</name>",
+            "    <time>\(createdAt)</time>",
+            "  </metadata>",
+            "  <trk>",
+            "    <name>\(name)</name>",
+            ""
+        ].joined(separator: "\n")
+    }
+
+    private static func footer() -> String {
+        [
             "  </trk>",
             "</gpx>",
             ""
@@ -120,5 +215,13 @@ enum GPXExporter {
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&apos;")
+    }
+}
+
+private extension FileHandle {
+    func writeText(_ value: String) throws {
+        if let data = value.data(using: .utf8) {
+            try write(contentsOf: data)
+        }
     }
 }

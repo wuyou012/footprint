@@ -11,23 +11,35 @@ final class RecordingManager: NSObject, ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var status = "Idle"
     @Published private(set) var stats = RecordingStats.idle
+    @Published private(set) var totalPointCount = 0
+    @Published private(set) var exportableSessionID: Int64?
+    @Published private(set) var backgroundRecordingEnabled = false
 
     private let locationManager = CLLocationManager()
     private let store = TrackDatabase.shared
     private var activeSession: ActiveRecordingSession?
     private var timer: Timer?
+    private var lifecycleObservers: [NSObjectProtocol] = []
+    private var userInterfaceActive = true
+    private let maxVisiblePoints = 3_000
 
     override init() {
         super.init()
         locationManager.delegate = self
         locationManager.activityType = .fitness
         locationManager.pausesLocationUpdatesAutomatically = false
+        locationManager.showsBackgroundLocationIndicator = false
+        configureLifecycleObservers()
         Task { await bootstrap() }
     }
 
     deinit {
+        for observer in lifecycleObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
         timer?.invalidate()
         locationManager.stopUpdatingLocation()
+        locationManager.allowsBackgroundLocationUpdates = false
         Task { @MainActor in
             UIApplication.shared.isIdleTimerDisabled = false
         }
@@ -35,7 +47,9 @@ final class RecordingManager: NSObject, ObservableObject {
 
     func reload() async {
         do {
-            points = try store.loadTrackPoints()
+            points = try store.loadLatestSessionTrackPoints(limit: maxVisiblePoints)
+            totalPointCount = try store.trackPointCount()
+            exportableSessionID = nil
         } catch {
             errorMessage = AppFormatters.errorMessage(error)
         }
@@ -46,7 +60,8 @@ final class RecordingManager: NSObject, ObservableObject {
         defer { busy = false }
         do {
             try store.interruptOpenForegroundSessions(reason: "replaced")
-            points = try store.loadTrackPoints()
+            points = try store.loadLatestSessionTrackPoints(limit: maxVisiblePoints)
+            totalPointCount = try store.trackPointCount()
         } catch {
             errorMessage = AppFormatters.errorMessage(error)
         }
@@ -60,14 +75,20 @@ final class RecordingManager: NSObject, ObservableObject {
 
         switch locationManager.authorizationStatus {
         case .notDetermined:
-            locationManager.requestWhenInUseAuthorization()
             pendingProfile = profile
+            status = "Allow Always Location for background recording"
+            locationManager.requestAlwaysAuthorization()
             busy = false
             return
-        case .authorizedAlways, .authorizedWhenInUse:
+        case .authorizedAlways:
             startAuthorized(profile: profile)
+        case .authorizedWhenInUse:
+            pendingProfile = profile
+            status = "Requesting Always Location..."
+            locationManager.requestAlwaysAuthorization()
+            busy = false
         case .denied, .restricted:
-            errorMessage = "Foreground location permission denied"
+            errorMessage = "Location permission denied"
             status = "GPS unavailable"
             busy = false
         @unknown default:
@@ -84,6 +105,8 @@ final class RecordingManager: NSObject, ObservableObject {
             let startedAt = AppFormatters.nowMs()
             let sessionID = try store.startRecordingSession(profile: profile, startMs: startedAt)
             let segmentID = try store.startTrackSegment(sessionID: sessionID, startMs: startedAt)
+            points = []
+            exportableSessionID = sessionID
             activeSession = ActiveRecordingSession(
                 sessionID: sessionID,
                 segmentID: segmentID,
@@ -98,13 +121,16 @@ final class RecordingManager: NSObject, ObservableObject {
 
             locationManager.desiredAccuracy = profile.desiredAccuracy
             locationManager.distanceFilter = profile.distanceFilter
+            locationManager.allowsBackgroundLocationUpdates = true
+            locationManager.showsBackgroundLocationIndicator = false
             locationManager.startUpdatingLocation()
             UIApplication.shared.isIdleTimerDisabled = true
+            backgroundRecordingEnabled = true
             recording = true
             busy = false
             status = "\(profile.label) recording"
             refreshStats()
-            startTimer()
+            startTimer(interval: profile.statsRefreshInterval)
         } catch {
             activeSession = nil
             recording = false
@@ -121,6 +147,7 @@ final class RecordingManager: NSObject, ObservableObject {
         timer?.invalidate()
         timer = nil
         locationManager.stopUpdatingLocation()
+        locationManager.allowsBackgroundLocationUpdates = false
         UIApplication.shared.isIdleTimerDisabled = false
 
         do {
@@ -137,7 +164,8 @@ final class RecordingManager: NSObject, ObservableObject {
                 )
             }
             activeSession = nil
-            points = try store.loadTrackPoints()
+            totalPointCount = try store.trackPointCount()
+            backgroundRecordingEnabled = false
             recording = false
             stats = .idle
             status = "Stopped"
@@ -148,13 +176,61 @@ final class RecordingManager: NSObject, ObservableObject {
         busy = false
     }
 
-    private func startTimer() {
+    private func startTimer(interval: TimeInterval) {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        let refreshInterval = max(1, interval)
+        timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshStats()
             }
         }
+        timer?.tolerance = min(2, refreshInterval * 0.2)
+    }
+
+    private func configureLifecycleObservers() {
+        let center = NotificationCenter.default
+        lifecycleObservers.append(center.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.appDidEnterBackground()
+            }
+        })
+        lifecycleObservers.append(center.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.appDidBecomeActive()
+            }
+        })
+    }
+
+    private func appDidEnterBackground() {
+        userInterfaceActive = false
+        timer?.invalidate()
+        timer = nil
+        if recording {
+            points.removeAll(keepingCapacity: false)
+            status = "Recording in background"
+        }
+    }
+
+    private func appDidBecomeActive() {
+        userInterfaceActive = true
+        guard let activeSession else { return }
+        do {
+            points = try store.loadTrackPoints(forSessionID: activeSession.sessionID, limit: maxVisiblePoints)
+            totalPointCount = try store.trackPointCount()
+        } catch {
+            errorMessage = AppFormatters.errorMessage(error)
+        }
+        status = "\(activeSession.profile.label) recording"
+        refreshStats()
+        startTimer(interval: activeSession.profile.statsRefreshInterval)
     }
 
     private func refreshStats() {
@@ -200,9 +276,12 @@ final class RecordingManager: NSObject, ObservableObject {
                 session.acceptedCount += 1
                 session.distanceMeters += distanceMeters ?? 0
                 session.lastAccepted = candidate
-                points.append(candidate)
                 activeSession = session
-                refreshStats()
+                if userInterfaceActive {
+                    appendVisiblePoint(candidate)
+                    totalPointCount += 1
+                    refreshStats()
+                }
             } catch {
                 errorMessage = AppFormatters.errorMessage(error)
                 status = "GPS write failed"
@@ -211,7 +290,17 @@ final class RecordingManager: NSObject, ObservableObject {
         case .reject:
             session.rejectedCount += 1
             activeSession = session
-            refreshStats()
+            if userInterfaceActive {
+                refreshStats()
+            }
+        }
+    }
+
+    private func appendVisiblePoint(_ point: TrackPoint) {
+        points.append(point)
+        let overflow = points.count - maxVisiblePoints
+        if overflow > 0 {
+            points.removeFirst(overflow)
         }
     }
 }
@@ -220,12 +309,22 @@ extension RecordingManager: CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         Task { @MainActor in
             guard let pendingProfile else { return }
-            self.pendingProfile = nil
-            if manager.authorizationStatus == .authorizedAlways || manager.authorizationStatus == .authorizedWhenInUse {
+            if manager.authorizationStatus == .notDetermined {
+                return
+            }
+            if manager.authorizationStatus == .authorizedAlways {
+                self.pendingProfile = nil
                 startAuthorized(profile: pendingProfile)
+            } else if manager.authorizationStatus == .authorizedWhenInUse {
+                self.pendingProfile = nil
+                errorMessage = "Always Location is required for background recording"
+                status = "Background permission needed"
+                busy = false
             } else if manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted {
-                errorMessage = "Foreground location permission denied"
+                self.pendingProfile = nil
+                errorMessage = "Location permission denied"
                 status = "GPS unavailable"
+                busy = false
             }
         }
     }
