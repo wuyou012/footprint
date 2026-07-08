@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 
 struct RecordView: View {
@@ -7,8 +8,12 @@ struct RecordView: View {
     @State private var selectedProfile: RecordingProfile = .daily
     @State private var lowPower = false
     @State private var exporting = false
+    @State private var importingPhotos = false
     @State private var exportError: String?
+    @State private var photoImportMessage: String?
     @State private var shareItem: ShareItem?
+    @State private var photoPoints: [PhotoMapPoint] = []
+    @State private var photoStorageRevision = 0
     @AppStorage("record.mapTint.red") private var mapTintRed = 84
     @AppStorage("record.mapTint.green") private var mapTintGreen = 132
     @AppStorage("record.mapTint.blue") private var mapTintBlue = 255
@@ -16,6 +21,13 @@ struct RecordView: View {
     @AppStorage("record.track.red") private var trackRed = 0
     @AppStorage("record.track.green") private var trackGreen = 158
     @AppStorage("record.track.blue") private var trackBlue = 184
+    @AppStorage("record.photoPoints") private var storedPhotoPoints = "[]"
+    @AppStorage("record.photoMarker.red") private var photoMarkerRed = 255
+    @AppStorage("record.photoMarker.green") private var photoMarkerGreen = 62
+    @AppStorage("record.photoMarker.blue") private var photoMarkerBlue = 128
+    @AppStorage("record.photoMarker.size") private var photoMarkerSize = 12.0
+    @AppStorage("record.photoMarker.renderMode") private var photoMarkerRenderModeRaw = PhotoMarkerRenderMode.mapDot.rawValue
+    @AppStorage("record.photoMarker.shape") private var photoMarkerShapeRaw = PhotoMarkerShape.circle.rawValue
 
     @State private var mapStyle: FootprintMapStyle = .standard
     @State private var mapDimension: FootprintMapDimension = .twoD
@@ -33,12 +45,23 @@ struct RecordView: View {
                     mapTintColor: mapTintColorBinding,
                     mapTintStrength: $mapTintStrength,
                     trackColor: trackColorBinding,
+                    photoMarkerRenderMode: photoMarkerRenderModeBinding,
+                    photoMarkerShape: photoMarkerShapeBinding,
+                    photoMarkerColor: photoMarkerColorBinding,
+                    photoMarkerSize: $photoMarkerSize,
+                    photoPointCount: photoPoints.count,
+                    importingPhotos: importingPhotos,
+                    photoImportMessage: photoImportMessage,
                     recording: recorder.recording,
                     backgroundRecordingEnabled: recorder.backgroundRecordingEnabled,
                     canExport: canExportCurrentTrack,
                     exporting: exporting,
                     exportError: exportError,
                     onBack: { showingSettings = false },
+                    onImportPhotoLibrary: importPhotoLibrary,
+                    onImportPhotoAlbum: importPhotoAlbum,
+                    onImportPhotos: importPhotoItems,
+                    onClearPhotoPoints: clearPhotoPoints,
                     onExport: exportCurrentTrack
                 )
             } else if recorder.recording && lowPower {
@@ -52,6 +75,7 @@ struct RecordView: View {
                 mapScene
             }
         }
+        .onAppear(perform: loadPhotoPointsFromStorage)
         .sheet(item: $shareItem) { item in
             ShareSheet(url: item.url)
         }
@@ -62,6 +86,11 @@ struct RecordView: View {
             TrackMapView(
                 points: recorder.points,
                 followLatest: recorder.recording,
+                photoPoints: photoPoints,
+                photoMarkerRenderMode: photoMarkerRenderMode,
+                photoMarkerShape: photoMarkerShape,
+                photoMarkerColor: photoMarkerColor,
+                photoMarkerSize: photoMarkerSize,
                 mapStyle: mapStyle,
                 mapDimension: mapDimension,
                 poiVisibility: poiVisibility,
@@ -198,6 +227,18 @@ struct RecordView: View {
         RGBColor(red: trackRed, green: trackGreen, blue: trackBlue)
     }
 
+    private var photoMarkerColor: RGBColor {
+        RGBColor(red: photoMarkerRed, green: photoMarkerGreen, blue: photoMarkerBlue)
+    }
+
+    private var photoMarkerShape: PhotoMarkerShape {
+        PhotoMarkerShape(rawValue: photoMarkerShapeRaw) ?? .circle
+    }
+
+    private var photoMarkerRenderMode: PhotoMarkerRenderMode {
+        PhotoMarkerRenderMode(rawValue: photoMarkerRenderModeRaw) ?? .mapDot
+    }
+
     private var mapTintColorBinding: Binding<RGBColor> {
         Binding(
             get: { mapTintColor },
@@ -220,6 +261,31 @@ struct RecordView: View {
         )
     }
 
+    private var photoMarkerColorBinding: Binding<RGBColor> {
+        Binding(
+            get: { photoMarkerColor },
+            set: {
+                photoMarkerRed = $0.red
+                photoMarkerGreen = $0.green
+                photoMarkerBlue = $0.blue
+            }
+        )
+    }
+
+    private var photoMarkerRenderModeBinding: Binding<PhotoMarkerRenderMode> {
+        Binding(
+            get: { photoMarkerRenderMode },
+            set: { photoMarkerRenderModeRaw = $0.rawValue }
+        )
+    }
+
+    private var photoMarkerShapeBinding: Binding<PhotoMarkerShape> {
+        Binding(
+            get: { photoMarkerShape },
+            set: { photoMarkerShapeRaw = $0.rawValue }
+        )
+    }
+
     private var canExportCurrentTrack: Bool {
         recorder.exportableSessionID != nil && !recorder.points.isEmpty && !recorder.recording
     }
@@ -232,6 +298,194 @@ struct RecordView: View {
     private func stop() {
         lowPower = false
         recorder.stop()
+    }
+
+    private func importPhotoItems(_ items: [PhotosPickerItem]) {
+        guard !items.isEmpty, !importingPhotos else { return }
+        importingPhotos = true
+        photoImportMessage = nil
+
+        Task {
+            var candidates: [PhotoMapPoint] = []
+            var skipped = 0
+
+            for item in items {
+                do {
+                    if let point = try await photoPoint(for: item) {
+                        candidates.append(point)
+                    } else {
+                        skipped += 1
+                    }
+                } catch {
+                    skipped += 1
+                }
+            }
+
+            await MainActor.run {
+                let imported = mergePhotoPoints(candidates)
+                importingPhotos = false
+                photoImportMessage = photoImportSummary(
+                    imported: imported,
+                    skipped: skipped,
+                    duplicate: candidates.count - imported
+                )
+            }
+        }
+    }
+
+    private func importPhotoLibrary(_ scope: PhotoLibraryImportScope) {
+        importPhotoMetadata(named: scope.label) {
+            await PhotoLocationExtractor.photoPoints(from: scope)
+        }
+    }
+
+    private func importPhotoAlbum(_ album: PhotoAlbumSummary) {
+        importPhotoMetadata(named: album.title) {
+            await PhotoLocationExtractor.photoPoints(fromAlbumID: album.id)
+        }
+    }
+
+    private func importPhotoMetadata(
+        named sourceName: String,
+        load: @escaping () async -> PhotoLocationExtractor.LibraryImportResult
+    ) {
+        guard !importingPhotos else { return }
+        importingPhotos = true
+        photoImportMessage = nil
+
+        Task {
+            let result = await load()
+
+            await MainActor.run {
+                if result.denied {
+                    importingPhotos = false
+                    photoImportMessage = "Photo library access is required to import \(sourceName)."
+                    return
+                }
+
+                let imported = mergePhotoPoints(result.points)
+                importingPhotos = false
+                photoImportMessage = "\(sourceName): " + photoImportSummary(
+                    imported: imported,
+                    skipped: result.skippedCount,
+                    duplicate: result.points.count - imported,
+                    scanned: result.scannedCount,
+                    limitedAccess: result.limitedAccess
+                )
+            }
+        }
+    }
+
+    private func photoPoint(for item: PhotosPickerItem) async throws -> PhotoMapPoint? {
+        if let identifier = item.itemIdentifier,
+           let coordinate = await PhotoLocationExtractor.coordinateFromPhotoAsset(identifier: identifier) {
+            return PhotoMapPoint(
+                id: identifier,
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude
+            )
+        }
+
+        guard let data = try await item.loadTransferable(type: Data.self) else {
+            return nil
+        }
+        let coordinate = await Task.detached(priority: .userInitiated) {
+            PhotoLocationExtractor.coordinateFromImageData(data)
+        }.value
+        guard let coordinate else {
+            return nil
+        }
+        return PhotoMapPoint(latitude: coordinate.latitude, longitude: coordinate.longitude)
+    }
+
+    @discardableResult
+    private func mergePhotoPoints(_ candidates: [PhotoMapPoint]) -> Int {
+        guard !candidates.isEmpty else { return 0 }
+
+        var merged = photoPoints
+        var importedIDs = Set(merged.map(\.id))
+        var importedCount = 0
+
+        for point in candidates where importedIDs.insert(point.id).inserted {
+            merged.append(point)
+            importedCount += 1
+        }
+
+        if importedCount > 0 {
+            savePhotoPoints(merged)
+        }
+        return importedCount
+    }
+
+    private func savePhotoPoints(_ points: [PhotoMapPoint]) {
+        photoPoints = points
+        photoStorageRevision += 1
+        let revision = photoStorageRevision
+
+        Task {
+            let json = await Task.detached(priority: .utility) {
+                Self.encodePhotoPoints(points)
+            }.value
+            guard revision == photoStorageRevision, let json else { return }
+            storedPhotoPoints = json
+        }
+    }
+
+    private func clearPhotoPoints() {
+        savePhotoPoints([])
+        photoImportMessage = nil
+    }
+
+    private func loadPhotoPointsFromStorage() {
+        let json = storedPhotoPoints
+        Task {
+            let decoded = await Task.detached(priority: .utility) {
+                Self.decodePhotoPoints(json)
+            }.value
+            photoPoints = decoded
+        }
+    }
+
+    nonisolated private static func decodePhotoPoints(_ json: String) -> [PhotoMapPoint] {
+        guard let data = json.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([PhotoMapPoint].self, from: data)
+        else { return [] }
+        return decoded
+    }
+
+    nonisolated private static func encodePhotoPoints(_ points: [PhotoMapPoint]) -> String? {
+        guard let data = try? JSONEncoder().encode(points) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func photoImportSummary(
+        imported: Int,
+        skipped: Int,
+        duplicate: Int = 0,
+        scanned: Int? = nil,
+        limitedAccess: Bool = false
+    ) -> String {
+        var parts: [String] = []
+        if let scanned {
+            parts.append("Scanned \(scanned)")
+        }
+        if imported > 0 {
+            parts.append("imported \(imported)")
+        }
+        if skipped > 0 {
+            parts.append("skipped \(skipped) without location")
+        }
+        if duplicate > 0 {
+            parts.append("ignored \(duplicate) already imported")
+        }
+        if imported == 0, skipped == 0, duplicate == 0 {
+            parts.append("no GPS location found")
+        }
+        var message = parts.joined(separator: ", ") + "."
+        if limitedAccess {
+            message += " Limited photo access is active."
+        }
+        return message
     }
 
     private func exportCurrentTrack() {

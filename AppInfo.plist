@@ -26,6 +26,8 @@
 	<string>footprint needs Always Location permission to keep recording routes in the background.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>footprint records your route while you use the app and asks for Always Location before background recording.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>footprint reads location metadata from photos you select so it can place photo points on the map.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

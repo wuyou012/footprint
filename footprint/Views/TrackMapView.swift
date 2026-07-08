@@ -161,6 +161,11 @@ struct TrackMapAppearance {
 struct TrackMapView: View {
     let points: [TrackPoint]
     var followLatest = false
+    var photoPoints: [PhotoMapPoint] = []
+    var photoMarkerRenderMode: PhotoMarkerRenderMode = .mapDot
+    var photoMarkerShape: PhotoMarkerShape = .circle
+    var photoMarkerColor: RGBColor = .defaultPhotoMarker
+    var photoMarkerSize: Double = 12
     var mapStyle: FootprintMapStyle = .standard
     var mapDimension: FootprintMapDimension = .twoD
     var poiVisibility: FootprintPOIVisibility = .shown
@@ -170,6 +175,7 @@ struct TrackMapView: View {
 
     private let segments: [MapSegment]
     private let sampledTrackPoints: [TrackMapPoint]
+    private let sampledPhotoPoints: [PhotoMapPoint]
     private let firstPoint: TrackPoint?
     private let lastPoint: TrackPoint?
     private let trackRegion: MKCoordinateRegion?
@@ -180,6 +186,11 @@ struct TrackMapView: View {
     init(
         points: [TrackPoint],
         followLatest: Bool = false,
+        photoPoints: [PhotoMapPoint] = [],
+        photoMarkerRenderMode: PhotoMarkerRenderMode = .mapDot,
+        photoMarkerShape: PhotoMarkerShape = .circle,
+        photoMarkerColor: RGBColor = .defaultPhotoMarker,
+        photoMarkerSize: Double = 12,
         mapStyle: FootprintMapStyle = .standard,
         mapDimension: FootprintMapDimension = .twoD,
         poiVisibility: FootprintPOIVisibility = .shown,
@@ -189,6 +200,11 @@ struct TrackMapView: View {
     ) {
         self.points = points
         self.followLatest = followLatest
+        self.photoPoints = photoPoints
+        self.photoMarkerRenderMode = photoMarkerRenderMode
+        self.photoMarkerShape = photoMarkerShape
+        self.photoMarkerColor = photoMarkerColor
+        self.photoMarkerSize = photoMarkerSize
         self.mapStyle = mapStyle
         self.mapDimension = mapDimension
         self.poiVisibility = poiVisibility
@@ -200,6 +216,10 @@ struct TrackMapView: View {
             from: points,
             followLatest: followLatest,
             maxPointMarkers: appearance.maxPointMarkers
+        )
+        self.sampledPhotoPoints = Self.makeSampledPhotoPoints(
+            from: photoPoints,
+            maxPointMarkers: Self.maxPhotoMarkers
         )
         self.firstPoint = points.first
         self.lastPoint = points.last
@@ -254,11 +274,31 @@ struct TrackMapView: View {
                         .frame(width: 17, height: 17)
                 }
             }
+            if photoMarkerRenderMode == .mapDot {
+                ForEach(sampledPhotoPoints) { point in
+                    MapCircle(center: point.coordinate, radius: photoDotRadiusMeters)
+                        .foregroundStyle(photoMarkerColor.color.opacity(0.78))
+                }
+            } else {
+                ForEach(sampledPhotoPoints) { point in
+                    Annotation("", coordinate: point.coordinate) {
+                        PhotoMapMarkerView(
+                            shape: photoMarkerShape,
+                            color: photoMarkerColor.color,
+                            size: photoMarkerSize
+                        )
+                    }
+                }
+            }
         }
         .mapStyle(mapStyle.mapStyle(dimension: mapDimension, poiVisibility: poiVisibility))
         .overlay {
             mapTintOverlay
         }
+    }
+
+    private var photoDotRadiusMeters: CLLocationDistance {
+        min(40, max(4, photoMarkerSize))
     }
 
     @ViewBuilder
@@ -297,6 +337,18 @@ struct TrackMapView: View {
         return points.enumerated().compactMap { index, point in
             guard index % step == 0, index != 0, index != points.count - 1 else { return nil }
             return TrackMapPoint(id: index, coordinate: point.coordinate, radiusMeters: followLatest ? 4 : 3)
+        }
+    }
+
+    private static func makeSampledPhotoPoints(
+        from points: [PhotoMapPoint],
+        maxPointMarkers: Int
+    ) -> [PhotoMapPoint] {
+        guard points.count > maxPointMarkers else { return points }
+        let safeLimit = max(1, maxPointMarkers)
+        let step = max(1, (points.count + safeLimit - 1) / safeLimit)
+        return points.enumerated().compactMap { index, point in
+            index % step == 0 ? point : nil
         }
     }
 
@@ -365,6 +417,7 @@ struct TrackMapView: View {
     }
 
     private static let fallbackCenter = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
+    private static let maxPhotoMarkers = 1_200
     private static let fallbackRegion = MKCoordinateRegion(
         center: fallbackCenter,
         span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
@@ -410,4 +463,69 @@ private struct TrackChangeToken: Equatable {
     let lastTimestampMs: Int64?
     let lastLatitude: Double?
     let lastLongitude: Double?
+}
+
+private struct PhotoMapMarkerView: View {
+    let shape: PhotoMarkerShape
+    let color: Color
+    let size: Double
+
+    var body: some View {
+        ZStack {
+            markerFill
+            markerStroke
+        }
+            .frame(width: clampedSize, height: clampedSize)
+            .allowsHitTesting(false)
+    }
+
+    private var clampedSize: Double {
+        min(36, max(6, size))
+    }
+
+    private var strokeWidth: Double {
+        max(1, clampedSize * 0.10)
+    }
+
+    @ViewBuilder
+    private var markerFill: some View {
+        switch shape {
+        case .circle:
+            Circle()
+                .fill(color)
+        case .square:
+            RoundedRectangle(cornerRadius: max(1.5, clampedSize * 0.18), style: .continuous)
+                .fill(color)
+        case .diamond:
+            DiamondShape()
+                .fill(color)
+        }
+    }
+
+    @ViewBuilder
+    private var markerStroke: some View {
+        switch shape {
+        case .circle:
+            Circle()
+                .stroke(.white, lineWidth: strokeWidth)
+        case .square:
+            RoundedRectangle(cornerRadius: max(1.5, clampedSize * 0.18), style: .continuous)
+                .stroke(.white, lineWidth: strokeWidth)
+        case .diamond:
+            DiamondShape()
+                .stroke(.white, lineWidth: strokeWidth)
+        }
+    }
+}
+
+private struct DiamondShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.midY))
+        path.closeSubpath()
+        return path
+    }
 }

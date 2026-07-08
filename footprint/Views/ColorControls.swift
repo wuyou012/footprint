@@ -45,6 +45,7 @@ struct RGBColor: Equatable {
 
     static let defaultTrack = RGBColor(red: 0, green: 158, blue: 184)
     static let defaultMapTint = RGBColor(red: 84, green: 132, blue: 255)
+    static let defaultPhotoMarker = RGBColor(red: 255, green: 62, blue: 128)
 
     private static func clamp(_ value: Int) -> Int {
         min(255, max(0, value))
