@@ -107,7 +107,38 @@ final class TrackDatabase {
             );
             CREATE INDEX IF NOT EXISTS idx_track_segments_session
               ON track_segments (session_id, start_ts);
-            PRAGMA user_version = 1;
+
+            CREATE TABLE IF NOT EXISTS region_achievement_cells (
+              cell_key TEXT PRIMARY KEY,
+              lat REAL NOT NULL,
+              lng REAL NOT NULL,
+              first_point_id INTEGER NOT NULL,
+              first_seen_ts INTEGER,
+              last_seen_ts INTEGER,
+              point_count INTEGER NOT NULL DEFAULT 0,
+              country_code TEXT,
+              country_name TEXT,
+              admin_area TEXT,
+              city_name TEXT,
+              city_key TEXT,
+              resolved_ts INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_region_achievement_cells_city
+              ON region_achievement_cells (city_key);
+
+            CREATE TABLE IF NOT EXISTS region_achievements (
+              city_key TEXT PRIMARY KEY,
+              country_code TEXT NOT NULL,
+              country_name TEXT NOT NULL,
+              admin_area TEXT,
+              city_name TEXT NOT NULL,
+              first_seen_ts INTEGER,
+              last_seen_ts INTEGER,
+              cell_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_region_achievements_country
+              ON region_achievements (country_code, city_name);
+            PRAGMA user_version = 2;
             """)
     }
 
@@ -602,6 +633,239 @@ final class TrackDatabase {
             } else {
                 throw TrackDatabaseError.stepFailed(errorMessage)
             }
+        }
+    }
+
+    func loadPendingRegionAchievementCells(limit: Int = 28) throws -> [RegionAchievementCandidateCell] {
+        let safeLimit = max(1, min(100, limit))
+        return try query("""
+            WITH cells AS (
+              SELECT
+                CAST(lat * 40 AS INTEGER) || ':' || CAST(lng * 40 AS INTEGER) AS cell_key,
+                CAST(lat * 40 AS INTEGER) AS lat_cell,
+                CAST(lng * 40 AS INTEGER) AS lng_cell,
+                AVG(lat) AS lat,
+                AVG(lng) AS lng,
+                MIN(id) AS first_point_id,
+                MIN(ts) AS first_seen_ts,
+                MAX(ts) AS last_seen_ts,
+                COUNT(*) AS point_count
+              FROM track_points
+              GROUP BY lat_cell, lng_cell
+            )
+            SELECT
+              cells.cell_key,
+              cells.lat,
+              cells.lng,
+              cells.first_point_id,
+              cells.first_seen_ts,
+              cells.last_seen_ts,
+              cells.point_count
+            FROM cells
+            LEFT JOIN region_achievement_cells done
+              ON done.cell_key = cells.cell_key
+            WHERE done.cell_key IS NULL
+            ORDER BY cells.first_point_id ASC
+            LIMIT ?
+            """, [safeLimit]) { statement in
+                RegionAchievementCandidateCell(
+                    cellKey: text(statement, 0) ?? "",
+                    latitude: sqlite3_column_double(statement, 1),
+                    longitude: sqlite3_column_double(statement, 2),
+                    firstPointID: sqlite3_column_int64(statement, 3),
+                    firstSeenMs: sqlite3_column_int64(statement, 4),
+                    lastSeenMs: sqlite3_column_int64(statement, 5),
+                    pointCount: Int(sqlite3_column_int64(statement, 6))
+                )
+            }
+    }
+
+    func hasPendingRegionAchievementCells() throws -> Bool {
+        try !loadPendingRegionAchievementCells(limit: 1).isEmpty
+    }
+
+    @discardableResult
+    func saveRegionAchievementCell(
+        _ cell: RegionAchievementCandidateCell,
+        place: RegionAchievementResolvedPlace?
+    ) throws -> Bool {
+        let cityAlreadyExists: Bool
+        if let place {
+            cityAlreadyExists = try scalarInt("SELECT COUNT(*) FROM region_achievements WHERE city_key = ?", [place.cityKey]) > 0
+        } else {
+            cityAlreadyExists = true
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try run("""
+                INSERT OR REPLACE INTO region_achievement_cells (
+                  cell_key, lat, lng, first_point_id, first_seen_ts,
+                  last_seen_ts, point_count, country_code, country_name,
+                  admin_area, city_name, city_key, resolved_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, [
+                    cell.cellKey,
+                    cell.latitude,
+                    cell.longitude,
+                    cell.firstPointID,
+                    cell.firstSeenMs,
+                    cell.lastSeenMs,
+                    cell.pointCount,
+                    place?.countryCode,
+                    place?.countryName,
+                    place?.adminArea,
+                    place?.cityName,
+                    place?.cityKey,
+                    AppFormatters.nowMs()
+                ])
+
+            if let place {
+                try run("""
+                    INSERT INTO region_achievements (
+                      city_key, country_code, country_name, admin_area,
+                      city_name, first_seen_ts, last_seen_ts, cell_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(city_key) DO UPDATE SET
+                      country_name = excluded.country_name,
+                      admin_area = excluded.admin_area,
+                      city_name = excluded.city_name,
+                      first_seen_ts = MIN(region_achievements.first_seen_ts, excluded.first_seen_ts),
+                      last_seen_ts = MAX(region_achievements.last_seen_ts, excluded.last_seen_ts),
+                      cell_count = region_achievements.cell_count + 1
+                    """, [
+                        place.cityKey,
+                        place.countryCode,
+                        place.countryName,
+                        place.adminArea,
+                        place.cityName,
+                        cell.firstSeenMs,
+                        cell.lastSeenMs
+                    ])
+            }
+
+            try execute("COMMIT")
+            return place != nil && !cityAlreadyExists
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func loadRegionAchievements() throws -> [RegionAchievementCountry] {
+        let cities = try query("""
+            SELECT
+              city_key, country_code, country_name, admin_area, city_name,
+              first_seen_ts, last_seen_ts, cell_count
+            FROM region_achievements
+            ORDER BY country_name COLLATE NOCASE ASC,
+              city_name COLLATE NOCASE ASC
+            """) { statement in
+                RegionAchievementCity(
+                    cityKey: text(statement, 0) ?? "",
+                    countryCode: text(statement, 1) ?? "",
+                    countryName: text(statement, 2) ?? "",
+                    adminArea: text(statement, 3),
+                    cityName: text(statement, 4) ?? "",
+                    firstSeenMs: int64(statement, 5),
+                    lastSeenMs: int64(statement, 6),
+                    cellCount: Int(sqlite3_column_int64(statement, 7))
+                )
+            }
+
+        var order: [String] = []
+        var grouped: [String: (name: String, cities: [RegionAchievementCity])] = [:]
+        for city in cities {
+            if grouped[city.countryCode] == nil {
+                order.append(city.countryCode)
+                grouped[city.countryCode] = (city.countryName, [])
+            }
+            grouped[city.countryCode]?.cities.append(city)
+        }
+
+        return order.compactMap { countryCode in
+            guard let group = grouped[countryCode] else { return nil }
+            return RegionAchievementCountry(
+                countryCode: countryCode,
+                countryName: group.name,
+                cities: group.cities
+            )
+        }
+    }
+
+    func loadRegionAchievementMapCities() throws -> [RegionAchievementMapCity] {
+        let cellPaddingDegrees = 0.0125
+        let rows = try query("""
+            SELECT
+              achievement.city_key,
+              achievement.country_code,
+              achievement.country_name,
+              achievement.admin_area,
+              achievement.city_name,
+              MIN(cell.lat) AS min_lat,
+              MAX(cell.lat) AS max_lat,
+              MIN(cell.lng) AS min_lng,
+              MAX(cell.lng) AS max_lng,
+              COUNT(cell.cell_key) AS cell_count
+            FROM region_achievements achievement
+            JOIN region_achievement_cells cell
+              ON cell.city_key = achievement.city_key
+            GROUP BY
+              achievement.city_key,
+              achievement.country_code,
+              achievement.country_name,
+              achievement.admin_area,
+              achievement.city_name
+            ORDER BY achievement.country_name COLLATE NOCASE ASC,
+              achievement.city_name COLLATE NOCASE ASC
+            """) { statement in
+                (
+                    cityKey: text(statement, 0) ?? "",
+                    countryCode: text(statement, 1) ?? "",
+                    countryName: text(statement, 2) ?? "",
+                    adminArea: text(statement, 3),
+                    cityName: text(statement, 4) ?? "",
+                    minLatitude: sqlite3_column_double(statement, 5) - cellPaddingDegrees,
+                    maxLatitude: sqlite3_column_double(statement, 6) + cellPaddingDegrees,
+                    minLongitude: sqlite3_column_double(statement, 7) - cellPaddingDegrees,
+                    maxLongitude: sqlite3_column_double(statement, 8) + cellPaddingDegrees,
+                    cellCount: Int(sqlite3_column_int64(statement, 9))
+                )
+            }
+
+        return rows.enumerated().map { index, row in
+            RegionAchievementMapCity(
+                cityKey: row.cityKey,
+                countryCode: row.countryCode,
+                countryName: row.countryName,
+                adminArea: row.adminArea,
+                cityName: row.cityName,
+                minLatitude: row.minLatitude,
+                maxLatitude: row.maxLatitude,
+                minLongitude: row.minLongitude,
+                maxLongitude: row.maxLongitude,
+                cellCount: row.cellCount,
+                colorIndex: index,
+                isUnlocked: true,
+                cityKeyAliases: [],
+                boundaryPolygons: []
+            )
+        }
+    }
+
+    func clearRegionAchievements() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try run("DELETE FROM region_achievement_cells")
+            try run("DELETE FROM region_achievements")
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
         }
     }
 

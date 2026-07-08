@@ -4,6 +4,7 @@ import SwiftUI
 struct RecordView: View {
     @ObservedObject var recorder: RecordingManager
     let onOpenHistory: () -> Void
+    let onOpenAchievements: () -> Void
 
     @State private var selectedProfile: RecordingProfile = .daily
     @State private var lowPower = false
@@ -138,18 +139,33 @@ struct RecordView: View {
             Spacer()
 
             if !recorder.recording {
-                Button(action: onOpenHistory) {
-                    Label("History", systemImage: "clock.arrow.circlepath")
-                        .labelStyle(.titleAndIcon)
-                        .font(.caption.weight(.bold))
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 12)
+                VStack(alignment: .trailing, spacing: 8) {
+                    Button(action: onOpenAchievements) {
+                        Label("Awards", systemImage: "trophy.fill")
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption.weight(.bold))
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 12)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .background(Color.black.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .disabled(recorder.busy)
+
+                    Button(action: onOpenHistory) {
+                        Label("History", systemImage: "clock.arrow.circlepath")
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption.weight(.bold))
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 12)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .background(Color.black.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .disabled(recorder.busy)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white)
-                .background(Color.black.opacity(0.72))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .disabled(recorder.busy)
             }
         }
     }

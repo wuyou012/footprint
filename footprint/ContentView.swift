@@ -4,6 +4,7 @@ enum AppRoute: Equatable {
     case record
     case history
     case dayDetail(String)
+    case achievements
 }
 
 struct ContentView: View {
@@ -15,7 +16,8 @@ struct ContentView: View {
         case .record:
             RecordView(
                 recorder: recorder,
-                onOpenHistory: { route = .history }
+                onOpenHistory: { route = .history },
+                onOpenAchievements: { route = .achievements }
             )
         case .history:
             HistoryView(
@@ -32,6 +34,10 @@ struct ContentView: View {
                         route = .history
                     }
                 }
+            )
+        case .achievements:
+            RegionAchievementsView(
+                onBack: { route = .record }
             )
         }
     }

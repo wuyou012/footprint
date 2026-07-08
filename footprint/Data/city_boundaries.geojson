@@ -1,0 +1,281 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "us-ca-san-francisco",
+        "cityKey": "us|ca|旧金山",
+        "countryCode": "us",
+        "countryName": "美国",
+        "adminArea": "CA",
+        "cityName": "旧金山",
+        "aliases": [
+          "us|ca|san francisco",
+          "us|california|san francisco",
+          "us|ca|san francisco city"
+        ]
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-122.5149, 37.7082],
+          [-122.5126, 37.7792],
+          [-122.4933, 37.8138],
+          [-122.4475, 37.8116],
+          [-122.3908, 37.8082],
+          [-122.3551, 37.7894],
+          [-122.3658, 37.7272],
+          [-122.4013, 37.7060],
+          [-122.4670, 37.7066],
+          [-122.5149, 37.7082]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "us-ca-oakland",
+        "cityKey": "us|ca|奥克兰",
+        "countryCode": "us",
+        "countryName": "美国",
+        "adminArea": "CA",
+        "cityName": "奥克兰",
+        "aliases": [
+          "us|ca|oakland",
+          "us|california|oakland"
+        ]
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-122.3550, 37.6948],
+          [-122.3170, 37.8650],
+          [-122.2460, 37.8890],
+          [-122.1650, 37.8530],
+          [-122.1320, 37.7740],
+          [-122.1770, 37.7040],
+          [-122.2610, 37.6870],
+          [-122.3550, 37.6948]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "us-ca-berkeley",
+        "cityKey": "us|ca|伯克利",
+        "countryCode": "us",
+        "countryName": "美国",
+        "adminArea": "CA",
+        "cityName": "伯克利",
+        "aliases": [
+          "us|ca|berkeley",
+          "us|california|berkeley"
+        ]
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-122.3240, 37.8480],
+          [-122.3130, 37.9040],
+          [-122.2800, 37.9180],
+          [-122.2380, 37.9010],
+          [-122.2430, 37.8560],
+          [-122.2850, 37.8420],
+          [-122.3240, 37.8480]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "us-ca-alameda",
+        "cityKey": "us|ca|阿拉米达",
+        "countryCode": "us",
+        "countryName": "美国",
+        "adminArea": "CA",
+        "cityName": "阿拉米达",
+        "aliases": [
+          "us|ca|alameda",
+          "us|california|alameda"
+        ]
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-122.3390, 37.7370],
+          [-122.2900, 37.7860],
+          [-122.2260, 37.7780],
+          [-122.2210, 37.7370],
+          [-122.2830, 37.7040],
+          [-122.3260, 37.7100],
+          [-122.3390, 37.7370]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "us-ca-daly-city",
+        "cityKey": "us|ca|戴利城",
+        "countryCode": "us",
+        "countryName": "美国",
+        "adminArea": "CA",
+        "cityName": "戴利城",
+        "aliases": [
+          "us|ca|daly city",
+          "us|california|daly city"
+        ]
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-122.5160, 37.6690],
+          [-122.4800, 37.7100],
+          [-122.4070, 37.7010],
+          [-122.4010, 37.6580],
+          [-122.4550, 37.6310],
+          [-122.5030, 37.6420],
+          [-122.5160, 37.6690]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "us-ca-south-san-francisco",
+        "cityKey": "us|ca|南旧金山",
+        "countryCode": "us",
+        "countryName": "美国",
+        "adminArea": "CA",
+        "cityName": "南旧金山",
+        "aliases": [
+          "us|ca|south san francisco",
+          "us|california|south san francisco"
+        ]
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-122.4560, 37.6250],
+          [-122.4000, 37.6700],
+          [-122.3500, 37.6530],
+          [-122.3530, 37.6060],
+          [-122.4300, 37.5940],
+          [-122.4560, 37.6250]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "us-ca-san-mateo",
+        "cityKey": "us|ca|圣马特奥",
+        "countryCode": "us",
+        "countryName": "美国",
+        "adminArea": "CA",
+        "cityName": "圣马特奥",
+        "aliases": [
+          "us|ca|san mateo",
+          "us|california|san mateo"
+        ]
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-122.3700, 37.5270],
+          [-122.3180, 37.5890],
+          [-122.2500, 37.5900],
+          [-122.2340, 37.5350],
+          [-122.2900, 37.4920],
+          [-122.3500, 37.5000],
+          [-122.3700, 37.5270]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "jp-tokyo-shinjuku",
+        "cityKey": "jp|东京|新宿区",
+        "countryCode": "jp",
+        "countryName": "日本",
+        "adminArea": "东京",
+        "cityName": "新宿区",
+        "aliases": [
+          "jp|tokyo|shinjuku",
+          "jp|tokyo|shinjuku city",
+          "jp|東京都|新宿区"
+        ]
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [139.6735, 35.6840],
+          [139.6880, 35.7175],
+          [139.7275, 35.7180],
+          [139.7440, 35.7000],
+          [139.7310, 35.6750],
+          [139.6985, 35.6640],
+          [139.6735, 35.6840]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "jp-tokyo-shibuya",
+        "cityKey": "jp|东京|涩谷区",
+        "countryCode": "jp",
+        "countryName": "日本",
+        "adminArea": "东京",
+        "cityName": "涩谷区",
+        "aliases": [
+          "jp|tokyo|shibuya",
+          "jp|東京都|渋谷区",
+          "jp|tokyo|渋谷区"
+        ]
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [139.6650, 35.6420],
+          [139.6860, 35.6740],
+          [139.7270, 35.6720],
+          [139.7310, 35.6480],
+          [139.7040, 35.6260],
+          [139.6720, 35.6250],
+          [139.6650, 35.6420]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "jp-tokyo-chiyoda",
+        "cityKey": "jp|东京|千代田区",
+        "countryCode": "jp",
+        "countryName": "日本",
+        "adminArea": "东京",
+        "cityName": "千代田区",
+        "aliases": [
+          "jp|tokyo|chiyoda",
+          "jp|東京都|千代田区"
+        ]
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [139.7330, 35.6715],
+          [139.7430, 35.7040],
+          [139.7750, 35.7060],
+          [139.7910, 35.6880],
+          [139.7770, 35.6660],
+          [139.7470, 35.6600],
+          [139.7330, 35.6715]
+        ]]
+      }
+    }
+  ]
+}
