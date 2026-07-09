@@ -193,15 +193,14 @@ actor RegionAchievementService {
 
     private static func adminCoverageKeys(for catalogCities: [RegionAchievementMapCity]) -> Set<String> {
         var keys = Set<String>()
-        for city in catalogCities where city.normalizedRegionId == "JP-13" {
-            let aliases = [
+        for city in catalogCities where isJapanAdmin1RegionId(city.normalizedRegionId) {
+            var aliases = [
                 city.adminArea,
-                city.cityName,
-                "東京都",
-                "東京",
-                "东京",
-                "tokyo"
+                city.cityName
             ]
+            if city.normalizedRegionId == "JP-13" {
+                aliases.append(contentsOf: ["東京都", "東京", "东京", "东京都", "tokyo"])
+            }
             for alias in aliases {
                 let normalizedAlias = normalizedKey(alias)
                 if !normalizedAlias.isEmpty {
@@ -218,6 +217,12 @@ actor RegionAchievementService {
     ) -> Bool {
         guard let adminArea = city.adminArea else { return false }
         return coverageKeys.contains("\(city.countryCodeKey)|\(normalizedKey(adminArea))")
+    }
+
+    private static func isJapanAdmin1RegionId(_ regionId: String?) -> Bool {
+        guard let regionId else { return false }
+        guard regionId.count == 5, regionId.hasPrefix("JP-") else { return false }
+        return regionId.suffix(2).allSatisfy(\.isNumber)
     }
 
     private static func sortedMapCities(_ cities: [RegionAchievementMapCity]) -> [RegionAchievementMapCity] {

@@ -199,5 +199,6 @@ for region in 视野内 regions:
 - **远岛 bbox**：含小笠原的 region bbox 巨大 → in-memory 区级 bbox 预筛变弱；多 admin1 region 时应上 per-polygon in-memory 空间索引。
 - **默认 focus**：当前硬编码东京本土；region 增多时改 data-driven（按选中 region 本土 bbox，排除远岛离群）。
 
-### 进行中
-- 全日本 47 都道府県 admin1：東京都（已亮）+ 其余 46 未点亮 faint 轮廓。
+### 待 review（branch: `feat/f001-japan-admin1`）
+- 全日本 47 都道府県 admin1：東京都（已亮）+ 其余 46 未点亮 faint 轮廓。数据源同为官方 **国土数値情報 N03 2024（CC BY 4.0）**，从 `N03-20240101_prefecture.geojson` 生成；轻量化参数：`filter-islands min-area=5km2` + `simplify 0.1% keep-shapes`。
+- 当前包体：`city_boundaries.geojson` 约 333KB，48 feature（SF + JP-01..JP-47），229 polygon，13,876 coordinates；iPhone 17 模拟器 dogfood 截图：`/tmp/footprint-f001-japan-admin1-map.png`。

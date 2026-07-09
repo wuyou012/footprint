@@ -11,4 +11,4 @@ created: 2026-07-08
 
 | ID | Name | Status | Owner | Link |
 |----|------|--------|-------|------|
-| F001 | Region Lighting（城市点亮）| in-progress · 東京都 admin1 已合入(`399f71e`) · 全日本 47 都道府県 进行中 | 砚砚（实现）/ opus（设计）| [F001](docs/features/F001-region-lighting.md) |
+| F001 | Region Lighting（城市点亮）| in-progress · 東京都 admin1 已合入(`399f71e`) · 全日本 47 都道府県 admin1 待 review | 砚砚（实现）/ opus（设计）| [F001](docs/features/F001-region-lighting.md) |

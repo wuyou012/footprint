@@ -149,12 +149,24 @@ func verifyBundledProvider() throws {
     let catalogURL = URL(fileURLWithPath: "footprint/Data/city_boundaries.geojson")
     let provider = BundledRegionDataProvider(url: catalogURL)
     let regions = try provider.regions()
-    try requireEqual(regions.count, 2, "Admin1 catalog should contain Tokyo plus the SF demo region")
+    try requireEqual(regions.count, 48, "Admin1 catalog should contain 47 Japan prefectures plus the SF demo region")
     try require(regions.allSatisfy { $0.datum == .wgs84 }, "Bundled catalog should use WGS-84 canonical datum")
     try require(regions.contains { $0.regionId == "US-CA-SF" }, "Catalog should expose San Francisco by canonical regionId")
+    let japanAdmin1 = regions
+        .filter { $0.countryCode.uppercased() == "JP" && $0.level == .admin1 }
+    try requireEqual(japanAdmin1.count, 47, "Japan catalog should expose all 47 prefectures")
+    let expectedPrefectureIds = Set((1...47).map { "JP-\(String(format: "%02d", $0))" })
+    try requireEqual(Set(japanAdmin1.map(\.regionId)), expectedPrefectureIds, "Japan prefecture region IDs should be JP-01 through JP-47")
+
+    let hokkaido = try requireRegion(regions, id: "JP-01")
     let tokyo = try requireRegion(regions, id: "JP-13")
+    let osaka = try requireRegion(regions, id: "JP-27")
+    let okinawa = try requireRegion(regions, id: "JP-47")
+    try requireEqual(hokkaido.nameZh, "北海道", "Hokkaido should use the official N03 prefecture name")
     try requireEqual(tokyo.level, .admin1, "Tokyo should be modeled as one admin1 region")
     try requireEqual(tokyo.nameZh, "東京都", "Tokyo admin1 should use Tokyo name")
+    try requireEqual(osaka.nameZh, "大阪府", "Osaka should use the official N03 prefecture name")
+    try requireEqual(okinawa.nameZh, "沖縄県", "Okinawa should use the official N03 prefecture name")
     try require(!regions.contains { $0.regionId == "JP-13104" }, "Fine-grained Shinjuku region should stay parked behind the ward-level tag")
     try require(!regions.contains { $0.regionId == "JP-13-SHINJUKU" }, "Legacy Shinjuku demo regionId should not return")
 
@@ -169,13 +181,20 @@ func verifyBundledProvider() throws {
     try requireEqual(sanFranciscoGeometry.count, 1, "San Francisco demo boundary should have one polygon")
     try requireEqual(sanFranciscoGeometry[0].exterior.coordinates.count, 100, "San Francisco boundary should keep 100 exterior coordinates")
     try require(tokyoGeometry.count >= 1, "Tokyo should retain at least one polygon")
-    try require(tokyoGeometry.count <= 80, "Tokyo admin1 geometry should stay lightweight enough for MapKit")
+    try require(tokyoGeometry.count <= 30, "Tokyo admin1 geometry should stay lightweight enough for MapKit")
+    let totalJapanPolygons = try japanAdmin1.reduce(0) { partialResult, region in
+        partialResult + (try provider.geometry(for: region.regionId).count)
+    }
+    try require(totalJapanPolygons <= 350, "Japan admin1 geometry should stay lightweight enough for MapKit")
 
     let matcher = try RegionMatcher(provider: provider, bboxPadding: 0)
     try requireEqual(matcher.match(Coordinate(latitude: 37.7793, longitude: -122.4193))?.region.regionId, "US-CA-SF", "Provider matcher should match the San Francisco demo seed")
     try requireEqual(matcher.match(Coordinate(latitude: 35.6910, longitude: 139.7020))?.region.regionId, "JP-13", "Provider matcher should match Shinjuku to Tokyo")
     try requireEqual(matcher.match(Coordinate(latitude: 35.6581, longitude: 139.7017))?.region.regionId, "JP-13", "Provider matcher should match Shibuya to Tokyo")
     try requireEqual(matcher.match(Coordinate(latitude: 27.0945, longitude: 142.1918))?.region.regionId, "JP-13", "Provider matcher should keep Ogasawara inside Tokyo")
+    try requireEqual(matcher.match(Coordinate(latitude: 43.0618, longitude: 141.3545))?.region.regionId, "JP-01", "Provider matcher should match Sapporo to Hokkaido")
+    try requireEqual(matcher.match(Coordinate(latitude: 34.6873, longitude: 135.5262))?.region.regionId, "JP-27", "Provider matcher should match Osaka Castle to Osaka")
+    try requireEqual(matcher.match(Coordinate(latitude: 26.2124, longitude: 127.6809))?.region.regionId, "JP-47", "Provider matcher should match Naha to Okinawa")
     try require(matcher.match(Coordinate(latitude: 34.0522, longitude: -118.2437)) == nil, "Provider matcher should not match a far outside point")
 }
 

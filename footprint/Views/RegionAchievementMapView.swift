@@ -213,6 +213,9 @@ struct RegionAchievementMapView: View {
         {
             return tokyoMainlandRegion()
         }
+        if let japanRegion = japanMainArchipelagoRegion(for: cities) {
+            return japanRegion
+        }
 
         let regionCities = citiesInInitialCluster(cities, focus: focus)
         guard let first = regionCities.first else {
@@ -331,6 +334,27 @@ struct RegionAchievementMapView: View {
             center: CLLocationCoordinate2D(latitude: 35.69, longitude: 139.50),
             span: MKCoordinateSpan(latitudeDelta: 1.25, longitudeDelta: 1.85)
         )
+    }
+
+    private static func japanMainArchipelagoRegion(
+        for cities: [RegionAchievementMapCity]
+    ) -> MKCoordinateRegion? {
+        guard cities.count >= 40,
+              cities.allSatisfy({ city in
+                  city.countryCodeKey == "JP" && isJapanAdmin1RegionId(city.normalizedRegionId)
+              })
+        else { return nil }
+
+        return MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 35.10, longitude: 135.15),
+            span: MKCoordinateSpan(latitudeDelta: 23.10, longitudeDelta: 26.80)
+        )
+    }
+
+    private static func isJapanAdmin1RegionId(_ regionId: String?) -> Bool {
+        guard let regionId else { return false }
+        guard regionId.count == 5, regionId.hasPrefix("JP-") else { return false }
+        return regionId.suffix(2).allSatisfy(\.isNumber)
     }
 }
 
