@@ -159,6 +159,17 @@ for region in 视野内 regions:
 - **OQ-2**：Overture divisions → region_id 命名映射方案（P6 定；建议 `CN-<adcode>` / `US-<state>-<slug>` / `JP-<pref>`）。
 - **OQ-3**：R*Tree 索引对含港澳台/海岛 MultiPolygon 的 bbox padding 取值（P3 定）。
 
+## Implementation Notes（2026-07-09）
+
+首批实现已锁定以下工程规则，后续 P2-P5 不应绕开：
+
+- **SQLite migration**：不得继续在 `migrate()` 末尾无条件写 `PRAGMA user_version = 2`。P2 必须先读取 `user_version`，按 v0/v1/v2→v3 做幂等迁移；旧 `city_key` achievement 要通过 catalog alias 映射到 `region_id`，无法映射的 legacy row 保留为 fallback/debug，不静默删除。
+- **R*Tree integer id**：SQLite R*Tree 主键使用 integer。`region_id` 仍是业务主键，但 storage 层要增加 `region_geometry_index(id INTEGER PRIMARY KEY, region_id, polygon_index)`，R*Tree 只存 integer id，再 join 回 `region_id`。
+- **PIP policy**：V0 matcher 采用 `edgePolicy = inside`；外环边界点视为命中，内环 hole 里的点不命中。GeoJSON Polygon 的 holes 必须保留，不能只读取 outer ring。
+- **真实点优先**：cell 只能作为 scan cursor/dedupe。P4 接入 sync 时，实际 point-in-polygon 应使用 cell 内真实 `track_points`（优先 accuracy 最好或 first accepted point），不要用 cell 平均代表点作为唯一点亮依据。
+- **Accuracy policy**：现有 `daily/eco` accepted point 可能达到 200m/300m。V0 可先遵循“accepted 即可点亮”，但命中记录必须写入 `region_hits.accuracy` 或可追溯到 `track_points.accuracy`；V1 再按 accuracy/驻留时间收紧。
+- **China display transform flag**：WGS→GCJ 只用于显示，不写回 DB。P5 接 MapKit 时必须保留可开关 display transform，直到 OQ-1 真机验证完成，避免在某些 MapKit 环境发生双重偏移。
+
 ## Evidence（一手来源，2026-07-09 调研）
 - CLLocationCoordinate2D = WGS-84：Apple 官方文档（T0）。iOS 未对 CLLocation 做中国 GCJ 预偏移（社区实测反证 + Apple 论坛 787990 工程师回避坐标问题，T1/T2）。
 - Apple Maps 中国用 Amap：apple.com/legal/privacy（T0）。
