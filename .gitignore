@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# AI assistant scaffolding (cat-cafe pack — auto-managed, per-machine)
+.cat-cafe/
+.claude/
+.codex/
+.gemini/
+.kimi/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+KIMI.md
+
+# Local planning scratch (not a project deliverable)
+input.md
