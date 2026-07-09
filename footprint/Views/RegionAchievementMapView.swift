@@ -57,7 +57,10 @@ struct RegionAchievementMapView: View {
                     in: model.cities,
                     countryCode: selectedCountryCode
                 )
-                let targetRegion = Self.region(for: countryCities, focus: model.focusCoordinate?.coordinate)
+                let targetRegion = Self.region(
+                    for: RegionAchievementMapFilter.overviewCities(in: countryCities),
+                    focus: model.focusCoordinate?.coordinate
+                )
                 visibleViewport = Self.viewport(for: targetRegion)
                 position = .region(targetRegion)
             }
@@ -105,7 +108,10 @@ struct RegionAchievementMapView: View {
                                 in: model.cities,
                                 countryCode: country.countryCode
                             )
-                            let targetRegion = Self.region(for: countryCities, focus: nil)
+                            let targetRegion = Self.region(
+                                for: RegionAchievementMapFilter.overviewCities(in: countryCities),
+                                focus: nil
+                            )
                             visibleViewport = Self.viewport(for: targetRegion)
                             withAnimation(.easeInOut(duration: 0.25)) {
                                 position = .region(targetRegion)

@@ -149,26 +149,36 @@ func verifyBundledProvider() throws {
     let catalogURL = URL(fileURLWithPath: "footprint/Data/city_boundaries.geojson")
     let provider = BundledRegionDataProvider(url: catalogURL)
     let regions = try provider.regions()
-    try requireEqual(regions.count, 2, "V0 demo catalog should contain exactly two bundled regions")
-    try require(regions.allSatisfy { $0.datum == .wgs84 }, "Bundled demo catalog should use WGS-84 canonical datum")
+    try requireEqual(regions.count, 63, "Tokyo city catalog should contain 62 Tokyo municipalities plus the SF demo region")
+    try require(regions.allSatisfy { $0.datum == .wgs84 }, "Bundled catalog should use WGS-84 canonical datum")
     try require(regions.contains { $0.regionId == "US-CA-SF" }, "Catalog should expose San Francisco by canonical regionId")
-    try require(regions.contains { $0.regionId == "JP-13-SHINJUKU" }, "Catalog should expose Shinjuku by canonical regionId")
-    let shinjukuAliases = try catalogAliases(in: catalogURL, regionId: "JP-13-SHINJUKU")
+    try require(regions.contains { $0.regionId == "JP-13104" }, "Catalog should expose Shinjuku by JIS regionId")
+    try require(!regions.contains { $0.regionId == "JP-13-SHINJUKU" }, "Legacy Shinjuku demo regionId should be migrated to JIS regionId")
+
+    let tokyoRegions = regions.filter { $0.parentId == "JP-13" }
+    try requireEqual(tokyoRegions.count, 62, "Tokyo catalog should contain all 62 municipalities/special wards")
+    let specialWardCodes = Set((101...123).map { "JP-13\(String(format: "%03d", $0))" })
+    let actualSpecialWardCodes = Set(tokyoRegions.map(\.regionId).filter { specialWardCodes.contains($0) })
+    try requireEqual(actualSpecialWardCodes, specialWardCodes, "Tokyo catalog should include all 23 special wards")
+
+    let shinjukuAliases = try catalogAliases(in: catalogURL, regionId: "JP-13104")
     try require(
         shinjukuAliases.contains("jp|东京|新宿区"),
         "Shinjuku catalog should alias Simplified Chinese CLGeocoder output"
     )
 
     let sanFranciscoGeometry = try provider.geometry(for: "US-CA-SF")
-    let shinjukuGeometry = try provider.geometry(for: "JP-13-SHINJUKU")
+    let shinjukuGeometry = try provider.geometry(for: "JP-13104")
     try requireEqual(sanFranciscoGeometry.count, 1, "San Francisco demo boundary should have one polygon")
     try requireEqual(shinjukuGeometry.count, 1, "Shinjuku demo boundary should have one polygon")
     try requireEqual(sanFranciscoGeometry[0].exterior.coordinates.count, 100, "San Francisco boundary should keep 100 exterior coordinates")
-    try requireEqual(shinjukuGeometry[0].exterior.coordinates.count, 100, "Shinjuku boundary should keep 100 exterior coordinates")
+    try require(shinjukuGeometry[0].exterior.coordinates.count >= 20, "Shinjuku boundary should retain a real simplified outline")
 
     let matcher = try RegionMatcher(provider: provider, bboxPadding: 0)
     try requireEqual(matcher.match(Coordinate(latitude: 37.7793, longitude: -122.4193))?.region.regionId, "US-CA-SF", "Provider matcher should match the San Francisco demo seed")
-    try requireEqual(matcher.match(Coordinate(latitude: 35.6910, longitude: 139.7020))?.region.regionId, "JP-13-SHINJUKU", "Provider matcher should match the Shinjuku demo seed")
+    try requireEqual(matcher.match(Coordinate(latitude: 35.6910, longitude: 139.7020))?.region.regionId, "JP-13104", "Provider matcher should match the Shinjuku demo seed")
+    try requireEqual(matcher.match(Coordinate(latitude: 35.6581, longitude: 139.7017))?.region.regionId, "JP-13113", "Provider matcher should match Shibuya")
+    try requireEqual(matcher.match(Coordinate(latitude: 35.6895, longitude: 139.6917))?.region.regionId, "JP-13104", "Provider matcher should keep Tokyo Metropolitan Government in Shinjuku")
     try require(matcher.match(Coordinate(latitude: 34.0522, longitude: -118.2437)) == nil, "Provider matcher should not match a far outside point")
 }
 
@@ -251,6 +261,17 @@ func verifyMapViewportFiltering() throws {
         maxLongitude: 139.75,
         unlocked: true
     )
+    let ogasawara = mapCity(
+        id: "JP-13421",
+        countryCode: "JP",
+        countryName: "Japan",
+        cityName: "Ogasawara",
+        minLatitude: 26.6,
+        maxLatitude: 27.2,
+        minLongitude: 142.0,
+        maxLongitude: 142.4,
+        unlocked: false
+    )
 
     let countries = RegionAchievementMapCountryOption.options(for: [sanFrancisco, shinjuku, oakland])
     try requireEqual(countries.map(\.countryCode), ["JP", "US"], "Country options should be normalized and sorted")
@@ -297,6 +318,9 @@ func verifyMapViewportFiltering() throws {
         viewport: tokyoViewport
     )
     try requireEqual(visibleJapan.map(\.cityKey), ["JP-13-SHINJUKU"], "Tokyo viewport should include Shinjuku only")
+
+    let overviewJapan = RegionAchievementMapFilter.overviewCities(in: [shinjuku, ogasawara])
+    try requireEqual(overviewJapan.map(\.cityKey), ["JP-13-SHINJUKU"], "Tokyo default overview should exclude remote islands")
 }
 
 #if DEBUG

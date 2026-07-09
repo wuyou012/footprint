@@ -73,6 +73,18 @@ nonisolated struct RegionAchievementMapCountryOption: Identifiable, Hashable, Se
 }
 
 nonisolated enum RegionAchievementMapFilter {
+    private static let tokyoIslandRegionIds: Set<String> = [
+        "JP-13361",
+        "JP-13362",
+        "JP-13363",
+        "JP-13364",
+        "JP-13381",
+        "JP-13382",
+        "JP-13401",
+        "JP-13402",
+        "JP-13421"
+    ]
+
     static func countryCities(
         in cities: [RegionAchievementMapCity],
         countryCode: String?
@@ -90,6 +102,17 @@ nonisolated enum RegionAchievementMapFilter {
         let countryScopedCities = countryCities(in: cities, countryCode: countryCode)
         guard let viewport else { return countryScopedCities }
         return countryScopedCities.filter { $0.intersects(viewport) }
+    }
+
+    static func overviewCities(in cities: [RegionAchievementMapCity]) -> [RegionAchievementMapCity] {
+        let mainlandCities = cities.filter { city in
+            guard city.countryCodeKey == "JP",
+                  let regionId = city.normalizedRegionId,
+                  regionId.hasPrefix("JP-13")
+            else { return true }
+            return !tokyoIslandRegionIds.contains(regionId)
+        }
+        return mainlandCities.isEmpty ? cities : mainlandCities
     }
 
     static func normalizeCountryCode(_ value: String) -> String {

@@ -49,6 +49,16 @@ nonisolated struct BundledRegionDataProvider: RegionDataProvider {
         return feature.geometry.regionPolygons
     }
 
+    func catalogFingerprint() throws -> String {
+        let data = try loader()
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in data {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(format: "%016llx", hash)
+    }
+
     private func decodedFeatures() throws -> [RegionBoundaryFeature] {
         try JSONDecoder().decode(RegionFeatureCollection.self, from: loader()).features
     }

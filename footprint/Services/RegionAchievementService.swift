@@ -120,9 +120,18 @@ actor RegionAchievementService {
         for region in regions {
             geometryByRegionId[region.regionId] = try provider.geometry(for: region.regionId)
         }
-        try store.replaceRegionCatalog(regions: regions, geometryByRegionId: geometryByRegionId)
+        try store.replaceRegionCatalogIfNeeded(
+            catalogKey: "city_boundaries",
+            fingerprint: try provider.catalogFingerprint(),
+            regions: regions,
+            geometryByRegionId: geometryByRegionId
+        )
 
-        let matcher = try RegionMatcher(regions: regions, geometryByRegionId: geometryByRegionId)
+        let catalog = try store.loadRegionCatalog()
+        let matcher = try RegionMatcher(
+            regions: catalog.regions,
+            geometryByRegionId: catalog.geometryByRegionId
+        )
         var pointCountsByRegionId: [String: Int] = [:]
 
         for sample in samples {
@@ -185,7 +194,7 @@ actor RegionAchievementService {
     private static func sortedMapCities(_ cities: [RegionAchievementMapCity]) -> [RegionAchievementMapCity] {
         cities.sorted { lhs, rhs in
             if lhs.isUnlocked != rhs.isUnlocked {
-                return !lhs.isUnlocked && rhs.isUnlocked
+                return lhs.isUnlocked && !rhs.isUnlocked
             }
             if lhs.countryName != rhs.countryName {
                 return lhs.countryName < rhs.countryName

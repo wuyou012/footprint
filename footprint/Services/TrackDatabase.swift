@@ -189,6 +189,13 @@ final class TrackDatabase {
             CREATE VIRTUAL TABLE IF NOT EXISTS region_rtree
               USING rtree(id, minLat, maxLat, minLng, maxLng);
 
+            CREATE TABLE IF NOT EXISTS region_catalog_metadata (
+              catalog_key TEXT PRIMARY KEY,
+              fingerprint TEXT NOT NULL,
+              region_count INTEGER NOT NULL,
+              updated_ts INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS region_hits (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               region_id TEXT NOT NULL,
@@ -301,6 +308,13 @@ final class TrackDatabase {
 
     private func double(_ statement: OpaquePointer?, _ index: Int32) -> Double? {
         sqlite3_column_type(statement, index) == SQLITE_NULL ? nil : sqlite3_column_double(statement, index)
+    }
+
+    private func data(_ statement: OpaquePointer?, _ index: Int32) -> Data? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL,
+              let pointer = sqlite3_column_blob(statement, index)
+        else { return nil }
+        return Data(bytes: pointer, count: Int(sqlite3_column_bytes(statement, index)))
     }
 
     private func point(from statement: OpaquePointer?) -> TrackPoint {
@@ -422,8 +436,8 @@ final class TrackDatabase {
         return try query("""
             WITH samples AS (
               SELECT
-                CAST(lat * 400 AS INTEGER) AS lat_cell,
-                CAST(lng * 400 AS INTEGER) AS lng_cell,
+                CAST(lat * 40 AS INTEGER) AS lat_cell,
+                CAST(lng * 40 AS INTEGER) AS lng_cell,
                 AVG(lat) AS lat,
                 AVG(lng) AS lng,
                 MAX(ts) AS last_seen_ts,
@@ -451,7 +465,9 @@ final class TrackDatabase {
 
     func replaceRegionCatalog(
         regions: [Region],
-        geometryByRegionId: [String: [RegionPolygon]]
+        geometryByRegionId: [String: [RegionPolygon]],
+        catalogKey: String? = nil,
+        fingerprint: String? = nil
     ) throws {
         let encoder = JSONEncoder()
         lock.lock()
@@ -518,11 +534,106 @@ final class TrackDatabase {
                 }
             }
 
+            if let catalogKey, let fingerprint {
+                try run("""
+                    INSERT INTO region_catalog_metadata (
+                      catalog_key, fingerprint, region_count, updated_ts
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(catalog_key) DO UPDATE SET
+                      fingerprint = excluded.fingerprint,
+                      region_count = excluded.region_count,
+                      updated_ts = excluded.updated_ts
+                    """, [
+                        catalogKey,
+                        fingerprint,
+                        regions.count,
+                        AppFormatters.nowMs()
+                    ])
+            }
+
             try execute("COMMIT")
         } catch {
             try? execute("ROLLBACK")
             throw error
         }
+    }
+
+    @discardableResult
+    func replaceRegionCatalogIfNeeded(
+        catalogKey: String,
+        fingerprint: String,
+        regions: [Region],
+        geometryByRegionId: [String: [RegionPolygon]]
+    ) throws -> Bool {
+        if try isRegionCatalogFresh(catalogKey: catalogKey, fingerprint: fingerprint) {
+            return false
+        }
+        try replaceRegionCatalog(
+            regions: regions,
+            geometryByRegionId: geometryByRegionId,
+            catalogKey: catalogKey,
+            fingerprint: fingerprint
+        )
+        return true
+    }
+
+    private func isRegionCatalogFresh(catalogKey: String, fingerprint: String) throws -> Bool {
+        let rows = try query("""
+            SELECT region_count
+            FROM region_catalog_metadata
+            WHERE catalog_key = ? AND fingerprint = ?
+            """, [catalogKey, fingerprint]) { statement in
+                Int(sqlite3_column_int64(statement, 0))
+            }
+        guard let regionCount = rows.first, regionCount > 0 else {
+            return false
+        }
+        let storedRegionCount = try scalarInt("SELECT COUNT(*) FROM regions")
+        let indexedPolygonCount = try scalarInt("SELECT COUNT(*) FROM region_rtree")
+        return storedRegionCount == regionCount && indexedPolygonCount > 0
+    }
+
+    func loadRegionCatalog() throws -> (regions: [Region], geometryByRegionId: [String: [RegionPolygon]]) {
+        let regions = try query("""
+            SELECT region_id, level, datum, name_zh, name_en, country_code,
+              parent_id, min_lat, max_lat, min_lng, max_lng
+            FROM regions
+            ORDER BY region_id ASC
+            """) { statement in
+                Region(
+                    regionId: text(statement, 0) ?? "",
+                    level: text(statement, 1).flatMap(RegionLevel.init(rawValue:)) ?? .city,
+                    datum: text(statement, 2).flatMap(Datum.init(rawValue:)) ?? .wgs84,
+                    bbox: BBox(
+                        minLatitude: sqlite3_column_double(statement, 7),
+                        maxLatitude: sqlite3_column_double(statement, 8),
+                        minLongitude: sqlite3_column_double(statement, 9),
+                        maxLongitude: sqlite3_column_double(statement, 10)
+                    ),
+                    parentId: text(statement, 6),
+                    nameZh: text(statement, 3) ?? "",
+                    nameEn: text(statement, 4) ?? "",
+                    countryCode: text(statement, 5) ?? ""
+                )
+            }
+
+        let decoder = JSONDecoder()
+        let geometryRows = try query("""
+            SELECT region_id, coordinates_blob
+            FROM region_geometries
+            ORDER BY region_id ASC, polygon_index ASC
+            """) { statement in
+                (
+                    regionId: text(statement, 0) ?? "",
+                    polygon: try decoder.decode(RegionPolygon.self, from: data(statement, 1) ?? Data())
+                )
+            }
+        var geometryByRegionId: [String: [RegionPolygon]] = [:]
+        for row in geometryRows where !row.regionId.isEmpty {
+            geometryByRegionId[row.regionId, default: []].append(row.polygon)
+        }
+
+        return (regions, geometryByRegionId)
     }
 
     func loadRegionSpatialCandidateIds(
