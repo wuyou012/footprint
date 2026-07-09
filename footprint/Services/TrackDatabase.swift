@@ -54,6 +54,7 @@ final class TrackDatabase {
         try execute("PRAGMA journal_mode = WAL")
         try execute("PRAGMA synchronous = NORMAL")
         try execute("PRAGMA temp_store = MEMORY")
+        let currentVersion = try userVersion()
         try execute("""
             CREATE TABLE IF NOT EXISTS track_points (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,8 +139,75 @@ final class TrackDatabase {
             );
             CREATE INDEX IF NOT EXISTS idx_region_achievements_country
               ON region_achievements (country_code, city_name);
-            PRAGMA user_version = 2;
             """)
+        try migrateRegionCatalogSchema(from: currentVersion)
+    }
+
+    private func userVersion() throws -> Int {
+        try query("PRAGMA user_version") { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
+    }
+
+    private func setUserVersion(_ version: Int) throws {
+        try execute("PRAGMA user_version = \(version)")
+    }
+
+    private func migrateRegionCatalogSchema(from currentVersion: Int) throws {
+        try execute("""
+            CREATE TABLE IF NOT EXISTS regions (
+              region_id TEXT PRIMARY KEY,
+              level TEXT NOT NULL,
+              datum TEXT NOT NULL,
+              name_zh TEXT NOT NULL,
+              name_en TEXT NOT NULL,
+              country_code TEXT NOT NULL,
+              parent_id TEXT,
+              min_lat REAL NOT NULL,
+              max_lat REAL NOT NULL,
+              min_lng REAL NOT NULL,
+              max_lng REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_regions_country
+              ON regions (country_code, level, region_id);
+
+            CREATE TABLE IF NOT EXISTS region_geometries (
+              region_id TEXT NOT NULL,
+              polygon_index INTEGER NOT NULL,
+              coordinates_blob BLOB NOT NULL,
+              datum TEXT NOT NULL,
+              PRIMARY KEY(region_id, polygon_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS region_geometry_index (
+              id INTEGER PRIMARY KEY,
+              region_id TEXT NOT NULL,
+              polygon_index INTEGER NOT NULL,
+              UNIQUE(region_id, polygon_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_region_geometry_index_region
+              ON region_geometry_index (region_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS region_rtree
+              USING rtree(id, minLat, maxLat, minLng, maxLng);
+
+            CREATE TABLE IF NOT EXISTS region_hits (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              region_id TEXT NOT NULL,
+              track_point_id INTEGER,
+              session_id INTEGER,
+              ts INTEGER,
+              lat REAL NOT NULL,
+              lng REAL NOT NULL,
+              accuracy REAL,
+              hit_method TEXT NOT NULL,
+              created_ts INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_region_hits_region_ts
+              ON region_hits (region_id, ts);
+            """)
+
+        if currentVersion < 3 {
+            try setUserVersion(3)
+        }
     }
 
     private func execute(_ sql: String) throws {
@@ -174,6 +242,10 @@ final class TrackDatabase {
                 sqlite3_bind_double(statement, position, value)
             case let value as String:
                 sqlite3_bind_text(statement, position, value, -1, sqliteTransient)
+            case let value as Data:
+                value.withUnsafeBytes { bytes in
+                    sqlite3_bind_blob(statement, position, bytes.baseAddress, Int32(value.count), sqliteTransient)
+                }
             default:
                 sqlite3_bind_null(statement, position)
             }
@@ -375,6 +447,106 @@ final class TrackDatabase {
                     pointCount: Int(sqlite3_column_int64(statement, 4))
                 )
             }
+    }
+
+    func replaceRegionCatalog(
+        regions: [Region],
+        geometryByRegionId: [String: [RegionPolygon]]
+    ) throws {
+        let encoder = JSONEncoder()
+        lock.lock()
+        defer { lock.unlock() }
+
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try run("DELETE FROM region_rtree")
+            try run("DELETE FROM region_geometry_index")
+            try run("DELETE FROM region_geometries")
+            try run("DELETE FROM regions")
+
+            for region in regions {
+                try run("""
+                    INSERT INTO regions (
+                      region_id, level, datum, name_zh, name_en, country_code,
+                      parent_id, min_lat, max_lat, min_lng, max_lng
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, [
+                        region.regionId,
+                        region.level.rawValue,
+                        region.datum.rawValue,
+                        region.nameZh,
+                        region.nameEn,
+                        region.countryCode.uppercased(),
+                        region.parentId,
+                        region.bbox.minLatitude,
+                        region.bbox.maxLatitude,
+                        region.bbox.minLongitude,
+                        region.bbox.maxLongitude
+                    ])
+
+                let polygons = geometryByRegionId[region.regionId] ?? []
+                for (polygonIndex, polygon) in polygons.enumerated() {
+                    let geometryData = try encoder.encode(polygon)
+                    try run("""
+                        INSERT INTO region_geometries (
+                          region_id, polygon_index, coordinates_blob, datum
+                        ) VALUES (?, ?, ?, ?)
+                        """, [
+                            region.regionId,
+                            polygonIndex,
+                            geometryData,
+                            region.datum.rawValue
+                        ])
+                    let geometryIndexID = try run("""
+                        INSERT INTO region_geometry_index (region_id, polygon_index)
+                        VALUES (?, ?)
+                        """, [
+                            region.regionId,
+                            polygonIndex
+                        ])
+                    let bbox = polygon.bbox
+                    try run("""
+                        INSERT INTO region_rtree (id, minLat, maxLat, minLng, maxLng)
+                        VALUES (?, ?, ?, ?, ?)
+                        """, [
+                            geometryIndexID,
+                            bbox.minLatitude,
+                            bbox.maxLatitude,
+                            bbox.minLongitude,
+                            bbox.maxLongitude
+                        ])
+                }
+            }
+
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func loadRegionSpatialCandidateIds(
+        for coordinate: Coordinate,
+        padding: Double = 0.0005
+    ) throws -> Set<String> {
+        let rows = try query("""
+            SELECT DISTINCT idx.region_id
+            FROM region_rtree rtree
+            JOIN region_geometry_index idx
+              ON idx.id = rtree.id
+            WHERE rtree.minLat <= ?
+              AND rtree.maxLat >= ?
+              AND rtree.minLng <= ?
+              AND rtree.maxLng >= ?
+            """, [
+                coordinate.latitude + padding,
+                coordinate.latitude - padding,
+                coordinate.longitude + padding,
+                coordinate.longitude - padding
+            ]) { statement in
+                text(statement, 0) ?? ""
+            }
+        return Set(rows.filter { !$0.isEmpty })
     }
 
     func appendTrackPoint(_ point: TrackPoint) throws {

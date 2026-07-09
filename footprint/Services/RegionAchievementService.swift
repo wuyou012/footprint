@@ -115,12 +115,21 @@ actor RegionAchievementService {
         guard !samples.isEmpty else { return [:] }
 
         let provider = BundledRegionDataProvider()
-        let matcher = try RegionMatcher(provider: provider)
+        let regions = try provider.regions()
+        var geometryByRegionId: [String: [RegionPolygon]] = [:]
+        for region in regions {
+            geometryByRegionId[region.regionId] = try provider.geometry(for: region.regionId)
+        }
+        try store.replaceRegionCatalog(regions: regions, geometryByRegionId: geometryByRegionId)
+
+        let matcher = try RegionMatcher(regions: regions, geometryByRegionId: geometryByRegionId)
         var pointCountsByRegionId: [String: Int] = [:]
 
         for sample in samples {
             guard Self.shouldUse(sample) else { continue }
-            guard let match = matcher.match(sample.coordinate) else { continue }
+            let candidateRegionIds = try store.loadRegionSpatialCandidateIds(for: sample.coordinate)
+            guard !candidateRegionIds.isEmpty else { continue }
+            guard let match = matcher.match(sample.coordinate, candidateRegionIds: candidateRegionIds) else { continue }
             pointCountsByRegionId[match.region.regionId, default: 0] += max(1, sample.pointCount)
         }
 

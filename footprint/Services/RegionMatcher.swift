@@ -65,8 +65,11 @@ nonisolated struct RegionMatcher: Sendable {
         )
     }
 
-    func match(_ point: Coordinate) -> RegionMatch? {
-        for entry in entries where entry.region.bbox.contains(point, padding: bboxPadding) {
+    func match(_ point: Coordinate, candidateRegionIds: Set<String>? = nil) -> RegionMatch? {
+        for entry in entries
+            where candidateRegionIds?.contains(entry.region.regionId) ?? true
+                && entry.region.bbox.contains(point, padding: bboxPadding)
+        {
             for (index, polygon) in entry.polygons.enumerated()
                 where polygon.bbox.contains(point, padding: bboxPadding)
                     && contains(point, in: polygon)
@@ -77,8 +80,11 @@ nonisolated struct RegionMatcher: Sendable {
         return nil
     }
 
-    func matches(_ point: Coordinate) -> [RegionMatch] {
+    func matches(_ point: Coordinate, candidateRegionIds: Set<String>? = nil) -> [RegionMatch] {
         entries.flatMap { entry in
+            if let candidateRegionIds, !candidateRegionIds.contains(entry.region.regionId) {
+                return [] as [RegionMatch]
+            }
             guard entry.region.bbox.contains(point, padding: bboxPadding) else {
                 return [] as [RegionMatch]
             }

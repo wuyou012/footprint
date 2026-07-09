@@ -37,14 +37,6 @@ struct RegionAchievementsView: View {
                     }
                     .disabled(model.syncing)
                 }
-                ToolbarItem(placement: .bottomBar) {
-                    Button(role: .destructive) {
-                        showResetConfirmation = true
-                    } label: {
-                        Label("Rescan", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .disabled(model.syncing)
-                }
             }
             .safeAreaInset(edge: .bottom) {
                 statusBar
@@ -81,6 +73,13 @@ struct RegionAchievementsView: View {
                 } label: {
                     Label("City Map", systemImage: "map.fill")
                 }
+
+                Button(role: .destructive) {
+                    showResetConfirmation = true
+                } label: {
+                    Label("Rescan", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(model.syncing)
             }
 
             ForEach(model.countries) { country in

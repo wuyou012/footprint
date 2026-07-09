@@ -5,7 +5,9 @@ import SwiftUI
 struct RegionAchievementMapView: View {
     @StateObject private var model = RegionAchievementMapViewModel()
     @State private var position: MapCameraPosition = .automatic
+    @State private var selectedCountryCode: String?
     @State private var selectedCityID: String?
+    @State private var visibleViewport: RegionAchievementMapViewport?
 
     var body: some View {
         Group {
@@ -41,34 +43,47 @@ struct RegionAchievementMapView: View {
         }
         .task {
             await model.load()
-            let focusedCity = Self.launchFocusCity(in: model.cities)
+            let launchFocusedCity = Self.launchFocusCity(in: model.cities)
+            let focusedCity = launchFocusedCity
                 ?? Self.focusedCity(in: model.cities, focus: model.focusCoordinate?.coordinate)
+            selectedCountryCode = focusedCity?.countryCodeKey ?? Self.defaultCountryCode(in: model.cities)
             selectedCityID = focusedCity?.id
-            if let focusedCity {
-                position = .region(Self.region(for: [focusedCity], focus: nil))
+            if let launchFocusedCity {
+                let targetRegion = Self.region(for: [launchFocusedCity], focus: nil)
+                visibleViewport = Self.viewport(for: targetRegion)
+                position = .region(targetRegion)
             } else {
-                position = .region(Self.region(for: model.cities, focus: nil))
+                let countryCities = RegionAchievementMapFilter.countryCities(
+                    in: model.cities,
+                    countryCode: selectedCountryCode
+                )
+                let targetRegion = Self.region(for: countryCities, focus: model.focusCoordinate?.coordinate)
+                visibleViewport = Self.viewport(for: targetRegion)
+                position = .region(targetRegion)
             }
         }
     }
 
     private var map: some View {
         Map(position: $position) {
-            ForEach(model.cities) { city in
+            ForEach(visibleCities) { city in
                 ForEach(city.mapBoundaryPolygons) { boundary in
                     MapPolygon(coordinates: boundary.mapCoordinates)
                         .foregroundStyle(Self.fillColor(for: city).opacity(Self.fillOpacity(for: city)))
 
                     MapPolyline(coordinates: boundary.closedMapCoordinates)
-                        .stroke(Self.strokeColor(for: city).opacity(city.isUnlocked ? 0.62 : 0.28), lineWidth: city.isUnlocked ? 6.2 : 2.6)
+                        .stroke(Self.strokeColor(for: city).opacity(city.isUnlocked ? 0.62 : 0.18), lineWidth: city.isUnlocked ? 6.2 : 1.8)
 
                     MapPolyline(coordinates: boundary.closedMapCoordinates)
-                        .stroke(Self.strokeColor(for: city).opacity(city.isUnlocked ? 0.98 : 0.62), lineWidth: city.isUnlocked ? 2.5 : 1.1)
+                        .stroke(Self.strokeColor(for: city).opacity(city.isUnlocked ? 0.98 : 0.42), lineWidth: city.isUnlocked ? 2.5 : 0.8)
                 }
             }
         }
         .mapStyle(.standard(elevation: .flat))
         .environment(\.colorScheme, .dark)
+        .onMapCameraChange(frequency: .onEnd) { context in
+            visibleViewport = Self.viewport(for: context.region)
+        }
     }
 
     private var mapLegend: some View {
@@ -82,11 +97,54 @@ struct RegionAchievementMapView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
-                    ForEach(model.cities) { city in
+                    ForEach(countryOptions) { country in
+                        Button {
+                            selectedCountryCode = country.countryCode
+                            selectedCityID = nil
+                            let countryCities = RegionAchievementMapFilter.countryCities(
+                                in: model.cities,
+                                countryCode: country.countryCode
+                            )
+                            let targetRegion = Self.region(for: countryCities, focus: nil)
+                            visibleViewport = Self.viewport(for: targetRegion)
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                position = .region(targetRegion)
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Text(country.countryCode)
+                                    .font(.caption.weight(.black))
+                                    .monospaced()
+                                Text("\(country.unlockedCount)/\(country.regionCount)")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 10)
+                            .background(.ultraThinMaterial)
+                            .overlay {
+                                if selectedCountryCode == country.countryCode {
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(Self.cityBoundaryColor.opacity(0.9), lineWidth: 1.5)
+                                }
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(selectedCountryCities) { city in
                         Button {
                             selectedCityID = city.id
+                            let targetRegion = Self.region(for: [city], focus: nil)
+                            visibleViewport = Self.viewport(for: targetRegion)
                             withAnimation(.easeInOut(duration: 0.25)) {
-                                position = .region(Self.region(for: [city], focus: nil))
+                                position = .region(targetRegion)
                             }
                         } label: {
                             HStack(spacing: 8) {
@@ -119,6 +177,25 @@ struct RegionAchievementMapView: View {
             }
         }
         .padding(.vertical, 10)
+    }
+
+    private var countryOptions: [RegionAchievementMapCountryOption] {
+        RegionAchievementMapCountryOption.options(for: model.cities)
+    }
+
+    private var selectedCountryCities: [RegionAchievementMapCity] {
+        RegionAchievementMapFilter.countryCities(
+            in: model.cities,
+            countryCode: selectedCountryCode
+        )
+    }
+
+    private var visibleCities: [RegionAchievementMapCity] {
+        RegionAchievementMapFilter.visibleCities(
+            in: model.cities,
+            countryCode: selectedCountryCode,
+            viewport: visibleViewport
+        )
     }
 
     private static func region(
@@ -171,7 +248,7 @@ struct RegionAchievementMapView: View {
     }
 
     private static func fillOpacity(for city: RegionAchievementMapCity) -> Double {
-        city.isUnlocked ? 0.46 : 0.13
+        city.isUnlocked ? 0.46 : 0.05
     }
 
     private static func citiesInInitialCluster(
@@ -220,6 +297,21 @@ struct RegionAchievementMapView: View {
         #else
         return nil
         #endif
+    }
+
+    private static func defaultCountryCode(in cities: [RegionAchievementMapCity]) -> String? {
+        let countryOptions = RegionAchievementMapCountryOption.options(for: cities)
+        return countryOptions.first(where: { $0.unlockedCount > 0 })?.countryCode
+            ?? countryOptions.first?.countryCode
+    }
+
+    private static func viewport(for region: MKCoordinateRegion) -> RegionAchievementMapViewport {
+        RegionAchievementMapViewport(
+            centerLatitude: region.center.latitude,
+            centerLongitude: region.center.longitude,
+            latitudeDelta: region.span.latitudeDelta,
+            longitudeDelta: region.span.longitudeDelta
+        )
     }
 }
 

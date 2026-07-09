@@ -131,6 +131,13 @@ func verifyMatcher() throws {
     try requireEqual(matcher.match(Coordinate(latitude: 23.1291, longitude: 113.2644))?.region.regionId, "CN-440100", "Guangzhou point should match Guangzhou")
     try requireEqual(matcher.match(Coordinate(latitude: 22.5431, longitude: 114.0579))?.region.regionId, "CN-440300", "Shenzhen point should match Shenzhen")
     try requireEqual(matcher.match(Coordinate(latitude: 35.6909, longitude: 139.7003))?.region.regionId, "JP-13-SHINJUKU", "Shinjuku point should match Shinjuku")
+    try require(
+        matcher.match(
+            Coordinate(latitude: 35.6909, longitude: 139.7003),
+            candidateRegionIds: Set(["US-CA-SF"])
+        ) == nil,
+        "Candidate region IDs should constrain matcher search space"
+    )
     try requireEqual(matcher.match(Coordinate(latitude: 22.2855, longitude: 114.30))?.region.regionId, "HK-HONG-KONG", "Hong Kong multipolygon should match east polygon")
     try require(matcher.match(Coordinate(latitude: 23.6, longitude: 114.7)) == nil, "Outside point should not match any city")
     try requireEqual(matcher.match(Coordinate(latitude: 0, longitude: 5))?.region.regionId, "TEST-HOLE", "Boundary point should be inside by V0 edge policy")
@@ -180,6 +187,118 @@ func catalogAliases(in url: URL, regionId: String) throws -> [String] {
     return []
 }
 
+func mapCity(
+    id: String,
+    countryCode: String,
+    countryName: String,
+    cityName: String,
+    minLatitude: Double,
+    maxLatitude: Double,
+    minLongitude: Double,
+    maxLongitude: Double,
+    unlocked: Bool
+) -> RegionAchievementMapCity {
+    RegionAchievementMapCity(
+        cityKey: id,
+        regionId: id,
+        countryCode: countryCode,
+        countryName: countryName,
+        adminArea: nil,
+        cityName: cityName,
+        minLatitude: minLatitude,
+        maxLatitude: maxLatitude,
+        minLongitude: minLongitude,
+        maxLongitude: maxLongitude,
+        cellCount: unlocked ? 1 : 0,
+        colorIndex: 0,
+        isUnlocked: unlocked,
+        cityKeyAliases: [],
+        boundaryPolygons: []
+    )
+}
+
+func verifyMapViewportFiltering() throws {
+    let sanFrancisco = mapCity(
+        id: "US-CA-SF",
+        countryCode: "us",
+        countryName: "United States",
+        cityName: "San Francisco",
+        minLatitude: 37.70,
+        maxLatitude: 37.84,
+        minLongitude: -122.53,
+        maxLongitude: -122.35,
+        unlocked: true
+    )
+    let oakland = mapCity(
+        id: "US-CA-OAK",
+        countryCode: "US",
+        countryName: "United States",
+        cityName: "Oakland",
+        minLatitude: 37.70,
+        maxLatitude: 37.88,
+        minLongitude: -122.31,
+        maxLongitude: -122.12,
+        unlocked: false
+    )
+    let shinjuku = mapCity(
+        id: "JP-13-SHINJUKU",
+        countryCode: "jp",
+        countryName: "Japan",
+        cityName: "Shinjuku",
+        minLatitude: 35.67,
+        maxLatitude: 35.73,
+        minLongitude: 139.67,
+        maxLongitude: 139.75,
+        unlocked: true
+    )
+
+    let countries = RegionAchievementMapCountryOption.options(for: [sanFrancisco, shinjuku, oakland])
+    try requireEqual(countries.map(\.countryCode), ["JP", "US"], "Country options should be normalized and sorted")
+    try requireEqual(countries.first(where: { $0.countryCode == "US" })?.regionCount, 2, "US country option should count both US cities")
+    try requireEqual(countries.first(where: { $0.countryCode == "US" })?.unlockedCount, 1, "US country option should count unlocked cities")
+
+    let bayViewport = RegionAchievementMapViewport(
+        centerLatitude: 37.78,
+        centerLongitude: -122.27,
+        latitudeDelta: 0.35,
+        longitudeDelta: 0.45
+    )
+    let visibleUS = RegionAchievementMapFilter.visibleCities(
+        in: [sanFrancisco, shinjuku, oakland],
+        countryCode: "us",
+        viewport: bayViewport
+    )
+    try requireEqual(Set(visibleUS.map(\.cityKey)), Set(["US-CA-SF", "US-CA-OAK"]), "Bay viewport should include only US cities in view")
+
+    let outsideViewport = RegionAchievementMapViewport(
+        centerLatitude: 0,
+        centerLongitude: 0,
+        latitudeDelta: 0.5,
+        longitudeDelta: 0.5
+    )
+    try require(
+        RegionAchievementMapFilter.visibleCities(
+            in: [sanFrancisco, shinjuku, oakland],
+            countryCode: "US",
+            viewport: outsideViewport
+        ).isEmpty,
+        "Viewport culling should not fall back to drawing a whole country when the viewport is outside it"
+    )
+
+    let tokyoViewport = RegionAchievementMapViewport(
+        centerLatitude: 35.70,
+        centerLongitude: 139.71,
+        latitudeDelta: 0.12,
+        longitudeDelta: 0.12
+    )
+    let visibleJapan = RegionAchievementMapFilter.visibleCities(
+        in: [sanFrancisco, shinjuku, oakland],
+        countryCode: "JP",
+        viewport: tokyoViewport
+    )
+    try requireEqual(visibleJapan.map(\.cityKey), ["JP-13-SHINJUKU"], "Tokyo viewport should include Shinjuku only")
+}
+
 #if DEBUG
 func verifyDemoSeeds() throws {
     let provider = BundledRegionDataProvider(
@@ -203,6 +322,7 @@ enum F001Verifier {
     static func main() throws {
         try verifyChinaGeo()
         try verifyMatcher()
+        try verifyMapViewportFiltering()
         try verifyBundledProvider()
         #if DEBUG
         try verifyDemoSeeds()
