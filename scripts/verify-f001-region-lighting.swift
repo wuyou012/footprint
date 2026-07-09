@@ -146,10 +146,12 @@ func verifyBundledProvider() throws {
     try require(regions.count >= 10, "Bundled starter catalog should contain at least 10 regions")
     try require(regions.allSatisfy { $0.datum == .wgs84 }, "Bundled starter catalog should use WGS-84 canonical datum")
     try require(regions.contains { $0.regionId == "JP-TOKYO-SHINJUKU" }, "Catalog should expose Shinjuku by canonical regionId")
+    try require(regions.contains { $0.regionId == "HK-HONG-KONG" }, "Catalog should expose Hong Kong by canonical regionId")
 
     let matcher = try RegionMatcher(provider: provider, bboxPadding: 0)
     try requireEqual(matcher.match(Coordinate(latitude: 35.6909, longitude: 139.7003))?.region.regionId, "JP-TOKYO-SHINJUKU", "Provider matcher should match Shinjuku")
     try requireEqual(matcher.match(Coordinate(latitude: 37.7749, longitude: -122.4194))?.region.regionId, "US-CA-SAN-FRANCISCO", "Provider matcher should match San Francisco")
+    try requireEqual(matcher.match(Coordinate(latitude: 22.3193, longitude: 114.1694))?.region.regionId, "HK-HONG-KONG", "Provider matcher should match Hong Kong")
 }
 
 @main

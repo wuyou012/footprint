@@ -49,6 +49,18 @@ struct RegionAchievementCandidateCell: Sendable {
     }
 }
 
+struct RegionAchievementTrackCoordinate: Sendable {
+    let latitude: Double
+    let longitude: Double
+    let timestampMs: Int64
+    let accuracy: Double?
+    let pointCount: Int
+
+    nonisolated var coordinate: Coordinate {
+        Coordinate(latitude: latitude, longitude: longitude)
+    }
+}
+
 struct RegionAchievementResolvedPlace: Sendable {
     let countryCode: String
     let countryName: String
@@ -66,6 +78,7 @@ struct RegionAchievementSyncResult: Sendable {
 
 struct RegionAchievementMapCity: Identifiable, Hashable, Sendable {
     let cityKey: String
+    let regionId: String?
     let countryCode: String
     let countryName: String
     let adminArea: String?
@@ -126,9 +139,16 @@ struct RegionAchievementMapCity: Identifiable, Hashable, Sendable {
         Array(Set([cityKey] + cityKeyAliases))
     }
 
+    nonisolated var normalizedRegionId: String? {
+        regionId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+    }
+
     nonisolated func applyingUnlock(from city: RegionAchievementMapCity) -> RegionAchievementMapCity {
         RegionAchievementMapCity(
             cityKey: cityKey,
+            regionId: regionId,
             countryCode: countryCode,
             countryName: countryName,
             adminArea: adminArea,
@@ -138,6 +158,26 @@ struct RegionAchievementMapCity: Identifiable, Hashable, Sendable {
             minLongitude: minLongitude,
             maxLongitude: maxLongitude,
             cellCount: max(cellCount, city.cellCount),
+            colorIndex: colorIndex,
+            isUnlocked: true,
+            cityKeyAliases: cityKeyAliases,
+            boundaryPolygons: boundaryPolygons
+        )
+    }
+
+    nonisolated func applyingTrackUnlock(pointCount: Int) -> RegionAchievementMapCity {
+        RegionAchievementMapCity(
+            cityKey: cityKey,
+            regionId: regionId,
+            countryCode: countryCode,
+            countryName: countryName,
+            adminArea: adminArea,
+            cityName: cityName,
+            minLatitude: minLatitude,
+            maxLatitude: maxLatitude,
+            minLongitude: minLongitude,
+            maxLongitude: maxLongitude,
+            cellCount: max(cellCount, pointCount),
             colorIndex: colorIndex,
             isUnlocked: true,
             cityKeyAliases: cityKeyAliases,

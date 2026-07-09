@@ -34,6 +34,7 @@ struct CityBoundaryCatalog: Sendable {
 
             return RegionAchievementMapCity(
                 cityKey: cityKey,
+                regionId: feature.properties.canonicalRegionId,
                 countryCode: Self.normalize(feature.properties.countryCode),
                 countryName: feature.properties.countryName,
                 adminArea: feature.properties.adminArea,
@@ -101,6 +102,7 @@ nonisolated private struct CityBoundaryFeature: Decodable {
 
 nonisolated private struct CityBoundaryProperties: Decodable {
     let id: String
+    let regionId: String?
     let cityKey: String?
     let countryCode: String
     let countryName: String
@@ -110,6 +112,8 @@ nonisolated private struct CityBoundaryProperties: Decodable {
 
     enum CodingKeys: CodingKey {
         case id
+        case regionId
+        case region_id
         case cityKey
         case countryCode
         case countryName
@@ -121,12 +125,22 @@ nonisolated private struct CityBoundaryProperties: Decodable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
+        regionId = try container.decodeIfPresent(String.self, forKey: .regionId)
+            ?? container.decodeIfPresent(String.self, forKey: .region_id)
         cityKey = try container.decodeIfPresent(String.self, forKey: .cityKey)
         countryCode = try container.decode(String.self, forKey: .countryCode)
         countryName = try container.decode(String.self, forKey: .countryName)
         adminArea = try container.decodeIfPresent(String.self, forKey: .adminArea)
         cityName = try container.decode(String.self, forKey: .cityName)
         aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
+    }
+
+    var canonicalRegionId: String {
+        let rawId = regionId ?? id
+        return rawId
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: "-")
+            .uppercased()
     }
 }
 

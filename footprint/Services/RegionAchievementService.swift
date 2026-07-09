@@ -23,6 +23,7 @@ actor RegionAchievementService {
             return unlockedCities
         }
 
+        let trackRegionPointCounts = try loadTrackRegionPointCounts()
         var unlockedByKey: [String: RegionAchievementMapCity] = [:]
         for city in unlockedCities {
             for key in city.matchKeys {
@@ -33,6 +34,10 @@ actor RegionAchievementService {
         var catalogKeys = Set<String>()
         var mergedCities = catalogCities.map { city in
             city.matchKeys.forEach { catalogKeys.insert($0) }
+            if let regionId = city.normalizedRegionId,
+               let pointCount = trackRegionPointCounts[regionId] {
+                return city.applyingTrackUnlock(pointCount: pointCount)
+            }
             guard let unlockedCity = city.matchKeys.compactMap({ unlockedByKey[$0] }).first else {
                 return city
             }
@@ -103,6 +108,28 @@ actor RegionAchievementService {
         let placemarks = try await geocoder.reverseGeocodeLocation(candidate.location)
         guard let placemark = placemarks.first else { return nil }
         return Self.place(from: placemark)
+    }
+
+    private func loadTrackRegionPointCounts() throws -> [String: Int] {
+        let samples = try store.loadRegionAchievementTrackSamples()
+        guard !samples.isEmpty else { return [:] }
+
+        let provider = BundledRegionDataProvider()
+        let matcher = try RegionMatcher(provider: provider)
+        var pointCountsByRegionId: [String: Int] = [:]
+
+        for sample in samples {
+            guard Self.shouldUse(sample) else { continue }
+            guard let match = matcher.match(sample.coordinate) else { continue }
+            pointCountsByRegionId[match.region.regionId, default: 0] += max(1, sample.pointCount)
+        }
+
+        return pointCountsByRegionId
+    }
+
+    private static func shouldUse(_ sample: RegionAchievementTrackCoordinate) -> Bool {
+        guard let accuracy = sample.accuracy else { return true }
+        return accuracy <= 500
     }
 
     private static func place(from placemark: CLPlacemark) -> RegionAchievementResolvedPlace? {

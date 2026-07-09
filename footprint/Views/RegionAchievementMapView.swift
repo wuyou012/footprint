@@ -52,18 +52,10 @@ struct RegionAchievementMapView: View {
                         .foregroundStyle(Self.fillColor(for: city).opacity(Self.fillOpacity(for: city)))
 
                     MapPolyline(coordinates: boundary.closedMapCoordinates)
-                        .stroke(Self.cityBoundaryColor.opacity(city.isUnlocked ? 0.80 : 0.54), lineWidth: city.isUnlocked ? 5.5 : 3.5)
+                        .stroke(Self.strokeColor(for: city).opacity(city.isUnlocked ? 0.62 : 0.28), lineWidth: city.isUnlocked ? 6.2 : 2.6)
 
                     MapPolyline(coordinates: boundary.closedMapCoordinates)
-                        .stroke(Self.cityBoundaryColor.opacity(city.isUnlocked ? 0.98 : 0.76), lineWidth: city.isUnlocked ? 2.2 : 1.3)
-                }
-
-                Annotation("", coordinate: city.centerCoordinate) {
-                    CityCenterMarker(
-                        cityName: city.cityName,
-                        color: city.isUnlocked ? Self.awardUnlockedColor : Self.cityInteriorColor,
-                        isUnlocked: city.isUnlocked
-                    )
+                        .stroke(Self.strokeColor(for: city).opacity(city.isUnlocked ? 0.98 : 0.62), lineWidth: city.isUnlocked ? 2.5 : 1.1)
                 }
             }
         }
@@ -74,9 +66,9 @@ struct RegionAchievementMapView: View {
     private var mapLegend: some View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
-                LegendItem(label: "Edge", color: Self.cityBoundaryColor, symbol: .stroke)
-                LegendItem(label: "City", color: Self.cityInteriorColor, symbol: .fill)
-                LegendItem(label: "Unlocked", color: Self.awardUnlockedColor, symbol: .fill)
+                LegendItem(label: "City boundary", color: Self.cityBoundaryColor, symbol: .stroke)
+                LegendItem(label: "No track", color: Self.cityInteriorColor, symbol: .fill)
+                LegendItem(label: "Track found", color: Self.awardUnlockedColor, symbol: .fill)
             }
             .padding(.horizontal, 12)
 
@@ -145,15 +137,19 @@ struct RegionAchievementMapView: View {
     }
 
     private static let cityBoundaryColor = Color(red: 0.21, green: 0.96, blue: 1.00)
-    private static let cityInteriorColor = Color(red: 0.03, green: 0.72, blue: 0.82)
+    private static let cityInteriorColor = Color(red: 0.04, green: 0.56, blue: 0.66)
     private static let awardUnlockedColor = Color(red: 1.00, green: 0.72, blue: 0.12)
 
     private static func fillColor(for city: RegionAchievementMapCity) -> Color {
         city.isUnlocked ? awardUnlockedColor : cityInteriorColor
     }
 
+    private static func strokeColor(for city: RegionAchievementMapCity) -> Color {
+        city.isUnlocked ? awardUnlockedColor : cityBoundaryColor
+    }
+
     private static func fillOpacity(for city: RegionAchievementMapCity) -> Double {
-        city.isUnlocked ? 0.38 : 0.24
+        city.isUnlocked ? 0.46 : 0.13
     }
 
     private static func citiesInInitialCluster(
@@ -171,42 +167,6 @@ struct RegionAchievementMapView: View {
     private static func longitudeDistance(_ lhs: Double, _ rhs: Double) -> Double {
         let rawDistance = abs(lhs - rhs)
         return min(rawDistance, 360 - rawDistance)
-    }
-}
-
-private struct CityCenterMarker: View {
-    let cityName: String
-    let color: Color
-    let isUnlocked: Bool
-
-    var body: some View {
-        VStack(spacing: 4) {
-            if isUnlocked {
-                Text(cityName)
-                    .font(.headline.weight(.heavy))
-                    .foregroundStyle(.white)
-                    .shadow(color: .black.opacity(0.75), radius: 2, x: 0, y: 1)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-            }
-
-            Circle()
-                .fill(color)
-                .frame(width: isUnlocked ? 20 : 11, height: isUnlocked ? 20 : 11)
-                .overlay {
-                    Circle()
-                        .stroke(.white.opacity(isUnlocked ? 1 : 0.72), lineWidth: isUnlocked ? 3 : 1.5)
-                }
-                .overlay(alignment: .center) {
-                    if isUnlocked {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white)
-                    }
-                }
-                .shadow(color: .black.opacity(0.28), radius: 2, x: 0, y: 1)
-        }
-        .allowsHitTesting(false)
     }
 }
 

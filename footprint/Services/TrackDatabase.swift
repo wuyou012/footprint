@@ -306,6 +306,40 @@ final class TrackDatabase {
             """, map: point).first
     }
 
+    func loadRegionAchievementTrackSamples(limit: Int = 120_000) throws -> [RegionAchievementTrackCoordinate] {
+        let safeLimit = max(0, min(250_000, limit))
+        guard safeLimit > 0 else { return [] }
+
+        return try query("""
+            WITH samples AS (
+              SELECT
+                CAST(lat * 400 AS INTEGER) AS lat_cell,
+                CAST(lng * 400 AS INTEGER) AS lng_cell,
+                AVG(lat) AS lat,
+                AVG(lng) AS lng,
+                MAX(ts) AS last_seen_ts,
+                MIN(accuracy) AS best_accuracy,
+                COUNT(*) AS point_count
+              FROM track_points
+              WHERE lat BETWEEN -90 AND 90
+                AND lng BETWEEN -180 AND 180
+              GROUP BY lat_cell, lng_cell
+              ORDER BY last_seen_ts DESC
+              LIMIT ?
+            )
+            SELECT lat, lng, last_seen_ts, best_accuracy, point_count
+            FROM samples
+            """, [safeLimit]) { statement in
+                RegionAchievementTrackCoordinate(
+                    latitude: sqlite3_column_double(statement, 0),
+                    longitude: sqlite3_column_double(statement, 1),
+                    timestampMs: sqlite3_column_int64(statement, 2),
+                    accuracy: double(statement, 3),
+                    pointCount: Int(sqlite3_column_int64(statement, 4))
+                )
+            }
+    }
+
     func appendTrackPoint(_ point: TrackPoint) throws {
         try run("""
             INSERT INTO track_points (
@@ -838,6 +872,7 @@ final class TrackDatabase {
         return rows.enumerated().map { index, row in
             RegionAchievementMapCity(
                 cityKey: row.cityKey,
+                regionId: nil,
                 countryCode: row.countryCode,
                 countryName: row.countryName,
                 adminArea: row.adminArea,
