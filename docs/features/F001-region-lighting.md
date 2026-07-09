@@ -180,3 +180,24 @@ for region in 视野内 regions:
 ## Review
 - 实现：砚砚（缅因猫/gpt）。Review：opus 或第三只猫（**禁止 self-review**）。
 - 按 `docs/SOP.md`：worktree → TDD → quality-gate → cross-review → merge-gate。
+
+## 进度日志（2026-07-09 · V0 交付）
+
+### 已交付并合入 `feature/city-boundary-achievements`
+- ✅ **P1 坐标层**：`ChinaGeo`（WGS↔GCJ 前向/迭代 + `isInsideChina`）、`CoordinateTransform`。
+- ✅ **2 城 demo**：SF `US-CA-SF` + 新宿 `JP-13104`，region_id + point-in-polygon + MapKit 渲染 + DEBUG seed 点亮（`aa542e5`）。
+- ✅ **Region catalog DB**：migration v3（幂等、无损）、`region_catalog_metadata` fingerprint gate（同 fingerprint 跳过重建）、`loadRegionCatalog` DB geometry readback、R*Tree（`region_geometry_index` integer id）。
+- ✅ **東京都 admin1 整块点亮**：`JP-13` 单 region，渲染压力 62→1，in-memory matcher（删除 per-sample DB R*Tree 查询）。数据源：官方 **国土数値情報 N03 2024（CC BY 4.0）**，mapshaper dissolve/simplify（`399f71e`）。
+- ✅ dogfood：iPhone 17 模拟器截图验收，co-creator 确认合理。
+
+### 封存（git tag，待后续恢复）
+- `f001-tokyo-ward-level-v1`（`b5526f5`）：東京都 62 市区町村精细版。恢复用于 ①「整块 vs 分区」切换开关；②区级精度 fix（细 cell 0.0025°）。
+
+### 追踪 debt（cross-review 记录，非阻塞）
+- **P4（重要）**：legacy `CLGeocoder` 成就路径仍在跑（设计决策 #4「反向地理编码降级」尚未落地），当前靠 `adminCoverageKeys` suppression band-aid 压其输出。应移除/降级为纯 debug fallback，让 `RegionMatcher` 成为唯一识别源。
+- **区级精度**：per-sample DB 查询已删；细 cell（0.0025°/278m）封存在 tag，admin1 模式不需要。
+- **远岛 bbox**：含小笠原的 region bbox 巨大 → in-memory 区级 bbox 预筛变弱；多 admin1 region 时应上 per-polygon in-memory 空间索引。
+- **默认 focus**：当前硬编码东京本土；region 增多时改 data-driven（按选中 region 本土 bbox，排除远岛离群）。
+
+### 进行中
+- 全日本 47 都道府県 admin1：東京都（已亮）+ 其余 46 未点亮 faint 轮廓。
