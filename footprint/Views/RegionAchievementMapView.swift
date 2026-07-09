@@ -5,6 +5,7 @@ import SwiftUI
 struct RegionAchievementMapView: View {
     @StateObject private var model = RegionAchievementMapViewModel()
     @State private var position: MapCameraPosition = .automatic
+    @State private var selectedCityID: String?
 
     var body: some View {
         Group {
@@ -40,7 +41,14 @@ struct RegionAchievementMapView: View {
         }
         .task {
             await model.load()
-            position = .region(Self.region(for: model.cities, focus: model.focusCoordinate?.coordinate))
+            let focusedCity = Self.launchFocusCity(in: model.cities)
+                ?? Self.focusedCity(in: model.cities, focus: model.focusCoordinate?.coordinate)
+            selectedCityID = focusedCity?.id
+            if let focusedCity {
+                position = .region(Self.region(for: [focusedCity], focus: nil))
+            } else {
+                position = .region(Self.region(for: model.cities, focus: nil))
+            }
         }
     }
 
@@ -75,22 +83,36 @@ struct RegionAchievementMapView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(model.cities) { city in
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(city.isUnlocked ? Self.awardUnlockedColor : Self.cityInteriorColor)
-                                .frame(width: 10, height: 10)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(city.cityName)
-                                    .font(.caption.weight(.bold))
-                                Text(city.subtitle)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                        Button {
+                            selectedCityID = city.id
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                position = .region(Self.region(for: [city], focus: nil))
                             }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(city.isUnlocked ? Self.awardUnlockedColor : Self.cityInteriorColor)
+                                    .frame(width: 10, height: 10)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(city.cityName)
+                                        .font(.caption.weight(.bold))
+                                    Text(city.subtitle)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 10)
+                            .background(.ultraThinMaterial)
+                            .overlay {
+                                if selectedCityID == city.id {
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(Self.awardUnlockedColor.opacity(0.9), lineWidth: 1.5)
+                                }
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 10)
-                        .background(.ultraThinMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -167,6 +189,37 @@ struct RegionAchievementMapView: View {
     private static func longitudeDistance(_ lhs: Double, _ rhs: Double) -> Double {
         let rawDistance = abs(lhs - rhs)
         return min(rawDistance, 360 - rawDistance)
+    }
+
+    private static func focusedCity(
+        in cities: [RegionAchievementMapCity],
+        focus: CLLocationCoordinate2D?
+    ) -> RegionAchievementMapCity? {
+        guard let focus else {
+            return cities.first(where: \.isUnlocked) ?? cities.first
+        }
+        return cities.min { lhs, rhs in
+            let lhsDistance = abs(lhs.centerCoordinate.latitude - focus.latitude)
+                + longitudeDistance(lhs.centerCoordinate.longitude, focus.longitude)
+            let rhsDistance = abs(rhs.centerCoordinate.latitude - focus.latitude)
+                + longitudeDistance(rhs.centerCoordinate.longitude, focus.longitude)
+            return lhsDistance < rhsDistance
+        }
+    }
+
+    private static func launchFocusCity(
+        in cities: [RegionAchievementMapCity]
+    ) -> RegionAchievementMapCity? {
+        #if DEBUG
+        let prefix = "--region-achievement-focus="
+        guard let rawArgument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }) else {
+            return nil
+        }
+        let regionId = String(rawArgument.dropFirst(prefix.count)).uppercased()
+        return cities.first { $0.normalizedRegionId == regionId }
+        #else
+        return nil
+        #endif
     }
 }
 

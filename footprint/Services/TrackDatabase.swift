@@ -306,6 +306,43 @@ final class TrackDatabase {
             """, map: point).first
     }
 
+#if DEBUG
+    func seedRegionAchievementDemoTrackPoints() throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try run("DELETE FROM track_points WHERE source = ?", [RegionAchievementDemoSeeds.source])
+            for seed in RegionAchievementDemoSeeds.points {
+                try run("""
+                    INSERT INTO track_points (
+                      lng, lat, ts, accuracy, speed, altitude, heading,
+                      session_id, segment_id, source, profile, local_day_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, [
+                        seed.coordinate.longitude,
+                        seed.coordinate.latitude,
+                        seed.timestampMs,
+                        10.0,
+                        nil,
+                        nil,
+                        nil,
+                        nil,
+                        nil,
+                        RegionAchievementDemoSeeds.source,
+                        RecordingProfile.high.rawValue,
+                        "2026-07-09"
+                    ])
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+#endif
+
     func loadRegionAchievementTrackSamples(limit: Int = 120_000) throws -> [RegionAchievementTrackCoordinate] {
         let safeLimit = max(0, min(250_000, limit))
         guard safeLimit > 0 else { return [] }

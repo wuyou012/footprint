@@ -139,20 +139,64 @@ func verifyMatcher() throws {
 }
 
 func verifyBundledProvider() throws {
+    let catalogURL = URL(fileURLWithPath: "footprint/Data/city_boundaries.geojson")
+    let provider = BundledRegionDataProvider(url: catalogURL)
+    let regions = try provider.regions()
+    try requireEqual(regions.count, 2, "V0 demo catalog should contain exactly two bundled regions")
+    try require(regions.allSatisfy { $0.datum == .wgs84 }, "Bundled demo catalog should use WGS-84 canonical datum")
+    try require(regions.contains { $0.regionId == "US-CA-SF" }, "Catalog should expose San Francisco by canonical regionId")
+    try require(regions.contains { $0.regionId == "JP-13-SHINJUKU" }, "Catalog should expose Shinjuku by canonical regionId")
+    let shinjukuAliases = try catalogAliases(in: catalogURL, regionId: "JP-13-SHINJUKU")
+    try require(
+        shinjukuAliases.contains("jp|东京|新宿区"),
+        "Shinjuku catalog should alias Simplified Chinese CLGeocoder output"
+    )
+
+    let sanFranciscoGeometry = try provider.geometry(for: "US-CA-SF")
+    let shinjukuGeometry = try provider.geometry(for: "JP-13-SHINJUKU")
+    try requireEqual(sanFranciscoGeometry.count, 1, "San Francisco demo boundary should have one polygon")
+    try requireEqual(shinjukuGeometry.count, 1, "Shinjuku demo boundary should have one polygon")
+    try requireEqual(sanFranciscoGeometry[0].exterior.coordinates.count, 100, "San Francisco boundary should keep 100 exterior coordinates")
+    try requireEqual(shinjukuGeometry[0].exterior.coordinates.count, 100, "Shinjuku boundary should keep 100 exterior coordinates")
+
+    let matcher = try RegionMatcher(provider: provider, bboxPadding: 0)
+    try requireEqual(matcher.match(Coordinate(latitude: 37.7793, longitude: -122.4193))?.region.regionId, "US-CA-SF", "Provider matcher should match the San Francisco demo seed")
+    try requireEqual(matcher.match(Coordinate(latitude: 35.6910, longitude: 139.7020))?.region.regionId, "JP-13-SHINJUKU", "Provider matcher should match the Shinjuku demo seed")
+    try require(matcher.match(Coordinate(latitude: 34.0522, longitude: -118.2437)) == nil, "Provider matcher should not match a far outside point")
+}
+
+func catalogAliases(in url: URL, regionId: String) throws -> [String] {
+    let data = try Data(contentsOf: url)
+    guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let features = root["features"] as? [[String: Any]]
+    else { return [] }
+
+    for feature in features {
+        guard let properties = feature["properties"] as? [String: Any],
+              properties["region_id"] as? String == regionId
+        else { continue }
+        return properties["aliases"] as? [String] ?? []
+    }
+    return []
+}
+
+#if DEBUG
+func verifyDemoSeeds() throws {
     let provider = BundledRegionDataProvider(
         url: URL(fileURLWithPath: "footprint/Data/city_boundaries.geojson")
     )
-    let regions = try provider.regions()
-    try require(regions.count >= 10, "Bundled starter catalog should contain at least 10 regions")
-    try require(regions.allSatisfy { $0.datum == .wgs84 }, "Bundled starter catalog should use WGS-84 canonical datum")
-    try require(regions.contains { $0.regionId == "JP-TOKYO-SHINJUKU" }, "Catalog should expose Shinjuku by canonical regionId")
-    try require(regions.contains { $0.regionId == "HK-HONG-KONG" }, "Catalog should expose Hong Kong by canonical regionId")
-
     let matcher = try RegionMatcher(provider: provider, bboxPadding: 0)
-    try requireEqual(matcher.match(Coordinate(latitude: 35.6909, longitude: 139.7003))?.region.regionId, "JP-TOKYO-SHINJUKU", "Provider matcher should match Shinjuku")
-    try requireEqual(matcher.match(Coordinate(latitude: 37.7749, longitude: -122.4194))?.region.regionId, "US-CA-SAN-FRANCISCO", "Provider matcher should match San Francisco")
-    try requireEqual(matcher.match(Coordinate(latitude: 22.3193, longitude: 114.1694))?.region.regionId, "HK-HONG-KONG", "Provider matcher should match Hong Kong")
+
+    try requireEqual(RegionAchievementDemoSeeds.points.count, 2, "V0 demo should seed exactly two track points")
+    for seed in RegionAchievementDemoSeeds.points {
+        try requireEqual(
+            matcher.match(seed.coordinate)?.region.regionId,
+            seed.regionId,
+            "Demo seed should fall inside its target region"
+        )
+    }
 }
+#endif
 
 @main
 enum F001Verifier {
@@ -160,6 +204,9 @@ enum F001Verifier {
         try verifyChinaGeo()
         try verifyMatcher()
         try verifyBundledProvider()
+        #if DEBUG
+        try verifyDemoSeeds()
+        #endif
         print("F001 verification passed")
     }
 }
