@@ -24,6 +24,7 @@ actor RegionAchievementService {
         }
 
         let trackRegionPointCounts = try loadTrackRegionPointCounts()
+        let adminCoverageKeys = Self.adminCoverageKeys(for: catalogCities)
         var unlockedByKey: [String: RegionAchievementMapCity] = [:]
         for city in unlockedCities {
             for key in city.matchKeys {
@@ -46,6 +47,7 @@ actor RegionAchievementService {
 
         let fallbackUnlockedCities = unlockedCities.filter { city in
             !city.matchKeys.contains { catalogKeys.contains($0) }
+                && !Self.isCoveredByAdminCatalog(city, coverageKeys: adminCoverageKeys)
         }
         mergedCities.append(contentsOf: fallbackUnlockedCities)
 
@@ -136,9 +138,7 @@ actor RegionAchievementService {
 
         for sample in samples {
             guard Self.shouldUse(sample) else { continue }
-            let candidateRegionIds = try store.loadRegionSpatialCandidateIds(for: sample.coordinate)
-            guard !candidateRegionIds.isEmpty else { continue }
-            guard let match = matcher.match(sample.coordinate, candidateRegionIds: candidateRegionIds) else { continue }
+            guard let match = matcher.match(sample.coordinate) else { continue }
             pointCountsByRegionId[match.region.regionId, default: 0] += max(1, sample.pointCount)
         }
 
@@ -189,6 +189,35 @@ actor RegionAchievementService {
             .lowercased()
             .replacingOccurrences(of: "|", with: " ")
         ?? ""
+    }
+
+    private static func adminCoverageKeys(for catalogCities: [RegionAchievementMapCity]) -> Set<String> {
+        var keys = Set<String>()
+        for city in catalogCities where city.normalizedRegionId == "JP-13" {
+            let aliases = [
+                city.adminArea,
+                city.cityName,
+                "東京都",
+                "東京",
+                "东京",
+                "tokyo"
+            ]
+            for alias in aliases {
+                let normalizedAlias = normalizedKey(alias)
+                if !normalizedAlias.isEmpty {
+                    keys.insert("\(city.countryCodeKey)|\(normalizedAlias)")
+                }
+            }
+        }
+        return keys
+    }
+
+    private static func isCoveredByAdminCatalog(
+        _ city: RegionAchievementMapCity,
+        coverageKeys: Set<String>
+    ) -> Bool {
+        guard let adminArea = city.adminArea else { return false }
+        return coverageKeys.contains("\(city.countryCodeKey)|\(normalizedKey(adminArea))")
     }
 
     private static func sortedMapCities(_ cities: [RegionAchievementMapCity]) -> [RegionAchievementMapCity] {

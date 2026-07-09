@@ -208,6 +208,12 @@ struct RegionAchievementMapView: View {
         for cities: [RegionAchievementMapCity],
         focus: CLLocationCoordinate2D?
     ) -> MKCoordinateRegion {
+        if cities.count == 1,
+           cities.first?.normalizedRegionId == "JP-13"
+        {
+            return tokyoMainlandRegion()
+        }
+
         let regionCities = citiesInInitialCluster(cities, focus: focus)
         guard let first = regionCities.first else {
             return MKCoordinateRegion(
@@ -317,6 +323,13 @@ struct RegionAchievementMapView: View {
             centerLongitude: region.center.longitude,
             latitudeDelta: region.span.latitudeDelta,
             longitudeDelta: region.span.longitudeDelta
+        )
+    }
+
+    private static func tokyoMainlandRegion() -> MKCoordinateRegion {
+        MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 35.69, longitude: 139.50),
+            span: MKCoordinateSpan(latitudeDelta: 1.25, longitudeDelta: 1.85)
         )
     }
 }

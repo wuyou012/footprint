@@ -17,7 +17,7 @@ nonisolated enum RegionAchievementDemoSeeds {
             timestampMs: 1_783_590_000_000
         ),
         Point(
-            regionId: "JP-13104",
+            regionId: "JP-13",
             coordinate: Coordinate(latitude: 35.6910, longitude: 139.7020),
             timestampMs: 1_783_590_060_000
         )
