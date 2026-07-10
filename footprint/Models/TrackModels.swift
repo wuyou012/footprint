@@ -37,24 +37,24 @@ enum RecordingProfile: String, CaseIterable, Identifiable {
     var distanceFilter: CLLocationDistance {
         switch self {
         case .high: 10
-        case .daily: 25
-        case .eco: 80
+        case .daily: 60
+        case .eco: 200
         }
     }
 
     var maxAcceptedAccuracyMeters: CLLocationAccuracy {
         switch self {
         case .high: 100
-        case .daily: 200
-        case .eco: 300
+        case .daily: 250
+        case .eco: 500
         }
     }
 
     var minDistanceMeters: CLLocationDistance {
         switch self {
         case .high: 8
-        case .daily: 25
-        case .eco: 70
+        case .daily: 55
+        case .eco: 180
         }
     }
 
@@ -75,6 +75,35 @@ enum RecordingProfile: String, CaseIterable, Identifiable {
     }
 
     var maxSpeedMetersPerSecond: CLLocationSpeed { 70 }
+
+    var stationaryTimeoutSeconds: Int {
+        switch self {
+        case .high: 300
+        case .daily: 180
+        case .eco: 0
+        }
+    }
+
+    var ambientSessionPolicy: AmbientSessionPolicy {
+        switch self {
+        case .high, .daily: .trip
+        case .eco: .daily
+        }
+    }
+
+    var usesDutyCycledAmbientLocation: Bool {
+        self == .eco
+    }
+}
+
+enum RecordingSessionKind: String, CaseIterable, Hashable {
+    case manual
+    case ambient
+}
+
+enum AmbientSessionOrigin: String, CaseIterable, Hashable {
+    case day
+    case visit
 }
 
 struct TrackPoint: Identifiable, Hashable {
@@ -140,12 +169,16 @@ struct DaySession: Identifiable, Hashable {
     var endMs: Int64?
     var pointCount: Int
     var distanceMeters: Double
+    var kind: RecordingSessionKind = .manual
+    var origin: AmbientSessionOrigin?
 }
 
 struct ActiveRecordingSession {
     var sessionID: Int64
     var segmentID: Int64
     var profile: RecordingProfile
+    var kind: RecordingSessionKind = .manual
+    var origin: AmbientSessionOrigin?
     var startedAtMs: Int64
     var receivedCount: Int
     var acceptedCount: Int

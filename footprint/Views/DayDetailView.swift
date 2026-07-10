@@ -60,12 +60,12 @@ struct DayDetailView: View {
                                 .disabled(actionDisabled)
                             }
 
-                            Text("Sessions")
+                            Text("Trips")
                                 .font(.title3.weight(.bold))
                                 .padding(.top, 4)
 
                             if sessions.isEmpty {
-                                Text("No sessions for this day.")
+                                Text("No trips for this day.")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                             } else {
@@ -178,7 +178,7 @@ private struct SessionRow: View {
                 Text(AppFormatters.formatClockRange(start: session.startMs, end: session.endMs))
                     .font(.subheadline.weight(.bold))
                 Spacer()
-                Text(session.profile?.rawValue.uppercased() ?? "UNKNOWN")
+                Text("\(session.profile?.rawValue.uppercased() ?? "UNKNOWN") · \(session.kind.label)")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.teal)
             }
@@ -189,5 +189,16 @@ private struct SessionRow: View {
         .padding(14)
         .background(Color(.secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private extension RecordingSessionKind {
+    var label: String {
+        switch self {
+        case .manual:
+            return "MANUAL"
+        case .ambient:
+            return "AUTO"
+        }
     }
 }

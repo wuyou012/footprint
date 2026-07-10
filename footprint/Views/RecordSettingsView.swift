@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RecordSettingsView: View {
     @Binding var selectedProfile: RecordingProfile
+    @Binding var persistentRecordingEnabled: Bool
     @Binding var mapStyle: FootprintMapStyle
     @Binding var mapDimension: FootprintMapDimension
     @Binding var poiVisibility: FootprintPOIVisibility
@@ -11,10 +12,12 @@ struct RecordSettingsView: View {
 
     let recording: Bool
     let backgroundRecordingEnabled: Bool
+    let persistentStatus: String
     let canExport: Bool
     let exporting: Bool
     let exportError: String?
     let onBack: () -> Void
+    let onPersistentRecordingChanged: (Bool) -> Void
     let onExport: () -> Void
 
     var body: some View {
@@ -34,8 +37,24 @@ struct RecordSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                    Toggle(isOn: Binding(
+                        get: { persistentRecordingEnabled },
+                        set: { onPersistentRecordingChanged($0) }
+                    )) {
+                        Label("后台常驻记录", systemImage: "location.circle")
+                    }
+                    .disabled(recording && !persistentRecordingEnabled)
+
+                    Text(persistentRecordingEnabled
+                         ? "Persistent \(persistentStatus). Manual Start is disabled until this is turned off."
+                         : "Records automatically in the background with Significant Location, Visit, and motion gating.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     if recording {
                         LabeledContent("Status", value: backgroundRecordingEnabled ? "Background enabled" : "Recording")
+                    } else if persistentRecordingEnabled {
+                        LabeledContent("Status", value: persistentStatus)
                     } else {
                         LabeledContent("Background", value: backgroundRecordingEnabled ? "Ready" : "Needs Always Location")
                     }

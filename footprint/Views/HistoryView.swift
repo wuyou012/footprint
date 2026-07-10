@@ -18,7 +18,7 @@ struct HistoryView: View {
                     ContentUnavailableView(
                         "No recordings yet",
                         systemImage: "figure.walk",
-                        description: Text("Start a foreground session and it will appear here by local day.")
+                        description: Text("Start a session or enable persistent recording and it will appear here by local day.")
                     )
                 } else {
                     List(summaries) { summary in
@@ -86,7 +86,7 @@ private struct DayCard: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("\(summary.sessionCount.formatted()) sessions · \(summary.pointCount.formatted()) points")
+            Text("\(summary.sessionCount.formatted()) trips · \(summary.pointCount.formatted()) points")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 

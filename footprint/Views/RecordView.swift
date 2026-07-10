@@ -4,7 +4,7 @@ struct RecordView: View {
     @ObservedObject var recorder: RecordingManager
     let onOpenHistory: () -> Void
 
-    @State private var selectedProfile: RecordingProfile = .daily
+    @AppStorage("record.selectedProfile") private var selectedProfileRaw = RecordingProfile.daily.rawValue
     @State private var lowPower = false
     @State private var exporting = false
     @State private var exportError: String?
@@ -26,7 +26,8 @@ struct RecordView: View {
         Group {
             if showingSettings {
                 RecordSettingsView(
-                    selectedProfile: $selectedProfile,
+                    selectedProfile: selectedProfileBinding,
+                    persistentRecordingEnabled: persistentRecordingBinding,
                     mapStyle: $mapStyle,
                     mapDimension: $mapDimension,
                     poiVisibility: $poiVisibility,
@@ -35,10 +36,12 @@ struct RecordView: View {
                     trackColor: trackColorBinding,
                     recording: recorder.recording,
                     backgroundRecordingEnabled: recorder.backgroundRecordingEnabled,
+                    persistentStatus: recorder.persistentStatus,
                     canExport: canExportCurrentTrack,
                     exporting: exporting,
                     exportError: exportError,
                     onBack: { showingSettings = false },
+                    onPersistentRecordingChanged: setPersistentRecording,
                     onExport: exportCurrentTrack
                 )
             } else if recorder.recording && lowPower {
@@ -156,16 +159,19 @@ struct RecordView: View {
                 }
             } else {
                 Button(action: start) {
-                    Label("Start \(selectedProfile.label)", systemImage: "location.fill")
+                    Label(
+                        recorder.persistentRecordingEnabled ? "Persistent recording active" : "Start \(selectedProfile.label)",
+                        systemImage: recorder.persistentRecordingEnabled ? "location.circle.fill" : "location.fill"
+                    )
                         .font(.headline.weight(.bold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 16)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
-                .background(recorder.busy ? Color.teal.opacity(0.45) : Color.teal)
+                .background(recorder.busy || recorder.persistentRecordingEnabled ? Color.teal.opacity(0.45) : Color.teal)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .disabled(recorder.busy)
+                .disabled(recorder.busy || recorder.persistentRecordingEnabled)
 
             }
         }
@@ -179,6 +185,9 @@ struct RecordView: View {
             return recorder.backgroundRecordingEnabled
                 ? "\(recorder.stats.acceptedCount.formatted()) points · BG"
                 : "\(recorder.stats.acceptedCount.formatted()) points"
+        }
+        if recorder.persistentRecordingEnabled {
+            return recorder.persistentStatus
         }
         return "\(recorder.totalPointCount.formatted()) saved"
     }
@@ -196,6 +205,24 @@ struct RecordView: View {
 
     private var trackColor: RGBColor {
         RGBColor(red: trackRed, green: trackGreen, blue: trackBlue)
+    }
+
+    private var selectedProfile: RecordingProfile {
+        RecordingProfile(rawValue: selectedProfileRaw) ?? .daily
+    }
+
+    private var selectedProfileBinding: Binding<RecordingProfile> {
+        Binding(
+            get: { selectedProfile },
+            set: { selectedProfileRaw = $0.rawValue }
+        )
+    }
+
+    private var persistentRecordingBinding: Binding<Bool> {
+        Binding(
+            get: { recorder.persistentRecordingEnabled },
+            set: { setPersistentRecording($0) }
+        )
     }
 
     private var mapTintColorBinding: Binding<RGBColor> {
@@ -227,6 +254,11 @@ struct RecordView: View {
     private func start() {
         exportError = nil
         recorder.start(profile: selectedProfile)
+    }
+
+    private func setPersistentRecording(_ enabled: Bool) {
+        exportError = nil
+        recorder.setPersistentRecording(enabled, profile: selectedProfile)
     }
 
     private func stop() {

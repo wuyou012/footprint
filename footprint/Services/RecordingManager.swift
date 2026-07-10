@@ -14,16 +14,41 @@ final class RecordingManager: NSObject, ObservableObject {
     @Published private(set) var totalPointCount = 0
     @Published private(set) var exportableSessionID: Int64?
     @Published private(set) var backgroundRecordingEnabled = false
+    @Published private(set) var persistentRecordingEnabled: Bool
+    @Published private(set) var persistentStatus = "Off"
 
     private let locationManager = CLLocationManager()
     private let store = TrackDatabase.shared
     private var activeSession: ActiveRecordingSession?
+    private var persistentProfile: RecordingProfile
+    private var persistentCoordinator: PersistentLocationCoordinator
+    private var ambientSegmenter: SessionSegmenter
+    private var pendingPersistentProfile: RecordingProfile?
     private var timer: Timer?
     private var lifecycleObservers: [NSObjectProtocol] = []
     private var userInterfaceActive = true
     private let maxVisiblePoints = 3_000
+    private static let persistentEnabledKey = "record.persistent.enabled"
+    private static let persistentProfileKey = "record.persistent.profile"
+
+    #if canImport(CoreMotion)
+    private lazy var motionProvider: CoreMotionActivityProvider = {
+        let provider = CoreMotionActivityProvider()
+        provider.onDecision = { [weak self] decision, timestampMs in
+            self?.handleMotionDecision(decision, timestampMs: timestampMs)
+        }
+        return provider
+    }()
+    #endif
 
     override init() {
+        let defaults = UserDefaults.standard
+        let savedProfile = defaults.string(forKey: Self.persistentProfileKey)
+            .flatMap(RecordingProfile.init(rawValue:)) ?? .daily
+        persistentRecordingEnabled = defaults.bool(forKey: Self.persistentEnabledKey)
+        persistentProfile = savedProfile
+        persistentCoordinator = PersistentLocationCoordinator(profile: savedProfile)
+        ambientSegmenter = SessionSegmenter(profile: savedProfile)
         super.init()
         locationManager.delegate = self
         locationManager.activityType = .fitness
@@ -39,6 +64,8 @@ final class RecordingManager: NSObject, ObservableObject {
         }
         timer?.invalidate()
         locationManager.stopUpdatingLocation()
+        locationManager.stopMonitoringSignificantLocationChanges()
+        locationManager.stopMonitoringVisits()
         locationManager.allowsBackgroundLocationUpdates = false
         Task { @MainActor in
             UIApplication.shared.isIdleTimerDisabled = false
@@ -62,6 +89,9 @@ final class RecordingManager: NSObject, ObservableObject {
             try store.interruptOpenForegroundSessions(reason: "replaced")
             points = try store.loadLatestSessionTrackPoints(limit: maxVisiblePoints)
             totalPointCount = try store.trackPointCount()
+            if persistentRecordingEnabled {
+                startPersistentMonitoringIfAuthorized(profile: persistentProfile)
+            }
         } catch {
             errorMessage = AppFormatters.errorMessage(error)
         }
@@ -69,6 +99,11 @@ final class RecordingManager: NSObject, ObservableObject {
 
     func start(profile: RecordingProfile) {
         guard !busy, !recording, activeSession == nil else { return }
+        guard !persistentRecordingEnabled else {
+            errorMessage = "Turn off persistent recording before manual Start"
+            status = "Persistent recording is active"
+            return
+        }
         errorMessage = nil
         busy = true
         status = "Checking \(profile.label) GPS..."
@@ -111,6 +146,8 @@ final class RecordingManager: NSObject, ObservableObject {
                 sessionID: sessionID,
                 segmentID: segmentID,
                 profile: profile,
+                kind: .manual,
+                origin: nil,
                 startedAtMs: startedAt,
                 receivedCount: 0,
                 acceptedCount: 0,
@@ -122,6 +159,7 @@ final class RecordingManager: NSObject, ObservableObject {
             locationManager.desiredAccuracy = profile.desiredAccuracy
             locationManager.distanceFilter = profile.distanceFilter
             locationManager.allowsBackgroundLocationUpdates = true
+            locationManager.pausesLocationUpdatesAutomatically = false
             locationManager.showsBackgroundLocationIndicator = false
             locationManager.startUpdatingLocation()
             UIApplication.shared.isIdleTimerDisabled = true
@@ -142,6 +180,10 @@ final class RecordingManager: NSObject, ObservableObject {
 
     func stop() {
         guard !busy else { return }
+        if persistentRecordingEnabled, activeSession?.kind == .ambient {
+            setPersistentRecording(false, profile: persistentProfile)
+            return
+        }
         busy = true
         errorMessage = nil
         timer?.invalidate()
@@ -215,20 +257,29 @@ final class RecordingManager: NSObject, ObservableObject {
         timer = nil
         if recording {
             points.removeAll(keepingCapacity: false)
-            status = "Recording in background"
+            status = persistentRecordingEnabled ? "Persistent recording in background" : "Recording in background"
+        } else if persistentRecordingEnabled {
+            status = "Persistent \(persistentProfile.label) ready"
         }
     }
 
     private func appDidBecomeActive() {
         userInterfaceActive = true
-        guard let activeSession else { return }
+        guard let activeSession else {
+            if persistentRecordingEnabled {
+                status = "Persistent \(persistentProfile.label) ready"
+            }
+            return
+        }
         do {
             points = try store.loadTrackPoints(forSessionID: activeSession.sessionID, limit: maxVisiblePoints)
             totalPointCount = try store.trackPointCount()
         } catch {
             errorMessage = AppFormatters.errorMessage(error)
         }
-        status = "\(activeSession.profile.label) recording"
+        status = activeSession.kind == .ambient
+            ? "Persistent \(activeSession.profile.label) recording"
+            : "\(activeSession.profile.label) recording"
         refreshStats()
         startTimer(interval: activeSession.profile.statsRefreshInterval)
     }
@@ -249,7 +300,244 @@ final class RecordingManager: NSObject, ObservableObject {
         )
     }
 
-    private func handle(_ location: CLLocation) {
+    func setPersistentRecording(_ enabled: Bool, profile: RecordingProfile) {
+        if enabled {
+            enablePersistentRecording(profile: profile)
+        } else {
+            disablePersistentRecording()
+        }
+    }
+
+    private func enablePersistentRecording(profile: RecordingProfile) {
+        guard !busy else { return }
+        guard activeSession == nil || activeSession?.kind == .ambient else {
+            errorMessage = "Stop the current manual recording before enabling persistent recording"
+            status = "Manual recording active"
+            return
+        }
+
+        errorMessage = nil
+        persistentProfile = profile
+        persistentCoordinator = PersistentLocationCoordinator(profile: profile)
+        ambientSegmenter = SessionSegmenter(profile: profile)
+        persistentRecordingEnabled = true
+        persistentStatus = "Checking permissions"
+        UserDefaults.standard.set(true, forKey: Self.persistentEnabledKey)
+        UserDefaults.standard.set(profile.rawValue, forKey: Self.persistentProfileKey)
+
+        switch locationManager.authorizationStatus {
+        case .notDetermined, .authorizedWhenInUse:
+            pendingPersistentProfile = profile
+            status = "Allow Always Location for persistent recording"
+            persistentStatus = "Needs Always Location"
+            locationManager.requestAlwaysAuthorization()
+        case .authorizedAlways:
+            startPersistentMonitoringIfAuthorized(profile: profile)
+        case .denied, .restricted:
+            persistentRecordingEnabled = false
+            persistentStatus = "Permission denied"
+            UserDefaults.standard.set(false, forKey: Self.persistentEnabledKey)
+            errorMessage = "Always Location is required for persistent recording"
+            status = "Background permission needed"
+        @unknown default:
+            persistentRecordingEnabled = false
+            persistentStatus = "Unavailable"
+            UserDefaults.standard.set(false, forKey: Self.persistentEnabledKey)
+            errorMessage = "Unknown location permission state"
+            status = "GPS unavailable"
+        }
+    }
+
+    private func startPersistentMonitoringIfAuthorized(profile: RecordingProfile) {
+        guard locationManager.authorizationStatus == .authorizedAlways else {
+            pendingPersistentProfile = profile
+            persistentStatus = "Needs Always Location"
+            return
+        }
+
+        persistentProfile = profile
+        persistentCoordinator.updateProfile(profile)
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.showsBackgroundLocationIndicator = false
+        locationManager.pausesLocationUpdatesAutomatically = true
+        locationManager.desiredAccuracy = profile.desiredAccuracy
+        locationManager.distanceFilter = profile.distanceFilter
+        locationManager.startMonitoringSignificantLocationChanges()
+        locationManager.startMonitoringVisits()
+        #if canImport(CoreMotion)
+        motionProvider.start()
+        #endif
+        backgroundRecordingEnabled = true
+        persistentStatus = "\(profile.label) ready"
+        status = "Persistent \(profile.label) ready"
+    }
+
+    private func disablePersistentRecording() {
+        pendingPersistentProfile = nil
+        UserDefaults.standard.set(false, forKey: Self.persistentEnabledKey)
+        persistentRecordingEnabled = false
+        persistentStatus = "Off"
+        ambientSegmenter.reset()
+        _ = persistentCoordinator.handle(.disabled(timestampMs: AppFormatters.nowMs()))
+        #if canImport(CoreMotion)
+        motionProvider.stop()
+        #endif
+        locationManager.stopMonitoringSignificantLocationChanges()
+        locationManager.stopMonitoringVisits()
+        locationManager.stopUpdatingLocation()
+        locationManager.allowsBackgroundLocationUpdates = false
+        locationManager.pausesLocationUpdatesAutomatically = false
+        finishAmbientSession(stopReason: "persistent_off")
+        backgroundRecordingEnabled = false
+        status = "Persistent recording off"
+    }
+
+    private func handleMotionDecision(_ decision: MotionDecision, timestampMs: Int64) {
+        guard persistentRecordingEnabled else { return }
+        let signal: PersistentMotionSignal
+        switch decision {
+        case .stationary:
+            signal = .stationary
+        case .moving:
+            signal = .moving
+        case .unknown:
+            signal = .unknown
+        }
+        applyPersistentCommands(persistentCoordinator.handle(.motion(signal, timestampMs: timestampMs)))
+    }
+
+    private func applyPersistentCommands(_ commands: [PersistentLocationCommand]) {
+        for command in commands {
+            switch command {
+            case .startContinuousLocation(let profile), .startDutyCycledLocation(let profile):
+                startAmbientLocationUpdates(profile: profile)
+            case .stopContinuousLocation:
+                stopAmbientLocationUpdates()
+            }
+        }
+    }
+
+    private func startAmbientLocationUpdates(profile: RecordingProfile) {
+        guard persistentRecordingEnabled, activeSession?.kind != .manual else { return }
+        locationManager.desiredAccuracy = profile.desiredAccuracy
+        locationManager.distanceFilter = profile.distanceFilter
+        locationManager.pausesLocationUpdatesAutomatically = true
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.startUpdatingLocation()
+        persistentStatus = "\(profile.label) sampling"
+        status = "Persistent \(profile.label) recording"
+    }
+
+    private func stopAmbientLocationUpdates() {
+        guard persistentRecordingEnabled else { return }
+        locationManager.stopUpdatingLocation()
+        persistentStatus = "\(persistentProfile.label) ready"
+        if persistentProfile.ambientSessionPolicy == .trip {
+            finishAmbientSession(stopReason: "stationary")
+        }
+        if activeSession == nil {
+            recording = false
+            stats = .idle
+            status = "Persistent \(persistentProfile.label) ready"
+        }
+    }
+
+    private func handlePersistentLocation(_ location: CLLocation) {
+        guard persistentRecordingEnabled, activeSession?.kind != .manual else { return }
+        let timestampMs = Int64(location.timestamp.timeIntervalSince1970 * 1000)
+        do {
+            try ensureAmbientSession(for: timestampMs)
+            handle(location, source: "ambient_gps")
+        } catch {
+            errorMessage = AppFormatters.errorMessage(error)
+            status = "Persistent write failed"
+        }
+    }
+
+    private func ensureAmbientSession(for timestampMs: Int64) throws {
+        let action = ambientSegmenter.action(for: .location(timestampMs: timestampMs))
+        switch action {
+        case .none, .reuseCurrent:
+            if activeSession == nil {
+                try startAmbientSession(
+                    profile: persistentProfile,
+                    startMs: timestampMs,
+                    origin: persistentProfile.ambientSessionPolicy == .daily ? .day : .visit
+                )
+            }
+        case .startNew(let origin, _):
+            try startAmbientSession(profile: persistentProfile, startMs: timestampMs, origin: origin)
+        case .finishAndStartNew(let origin, _):
+            finishAmbientSession(stopReason: "segment_roll")
+            try startAmbientSession(profile: persistentProfile, startMs: timestampMs, origin: origin)
+        case .finishCurrent:
+            finishAmbientSession(stopReason: "segment_end")
+        }
+    }
+
+    private func startAmbientSession(profile: RecordingProfile, startMs: Int64, origin: AmbientSessionOrigin) throws {
+        guard activeSession?.kind != .ambient else { return }
+        let sessionID = try store.startRecordingSession(
+            profile: profile,
+            startMs: startMs,
+            kind: .ambient,
+            origin: origin
+        )
+        let segmentID = try store.startTrackSegment(sessionID: sessionID, startMs: startMs)
+        activeSession = ActiveRecordingSession(
+            sessionID: sessionID,
+            segmentID: segmentID,
+            profile: profile,
+            kind: .ambient,
+            origin: origin,
+            startedAtMs: startMs,
+            receivedCount: 0,
+            acceptedCount: 0,
+            rejectedCount: 0,
+            distanceMeters: 0,
+            lastAccepted: nil
+        )
+        exportableSessionID = nil
+        recording = true
+        status = "Persistent \(profile.label) recording"
+        startTimer(interval: profile.statsRefreshInterval)
+    }
+
+    private func finishAmbientSession(stopReason: String) {
+        guard let session = activeSession, session.kind == .ambient else { return }
+        timer?.invalidate()
+        timer = nil
+        do {
+            try store.finishRecordingSession(
+                sessionID: session.sessionID,
+                segmentID: session.segmentID,
+                endMs: AppFormatters.nowMs(),
+                status: "completed",
+                stopReason: stopReason,
+                receivedCount: session.receivedCount,
+                rejectedCount: session.rejectedCount,
+                distanceMeters: session.distanceMeters
+            )
+            totalPointCount = try store.trackPointCount()
+        } catch {
+            errorMessage = AppFormatters.errorMessage(error)
+        }
+        activeSession = nil
+        recording = false
+        stats = .idle
+    }
+
+    private func handleVisit(_ visit: CLVisit) {
+        guard persistentRecordingEnabled else { return }
+        let timestampMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let action = ambientSegmenter.action(for: .visitArrival(timestampMs: timestampMs))
+        if action == .finishCurrent {
+            finishAmbientSession(stopReason: "visit_arrival")
+        }
+        applyPersistentCommands(persistentCoordinator.handle(.visitArrival(timestampMs: timestampMs)))
+    }
+
+    private func handle(_ location: CLLocation, source: String = "gps") {
         guard var session = activeSession else { return }
         let timestampMs = Int64(location.timestamp.timeIntervalSince1970 * 1000)
         let candidate = TrackPoint(
@@ -263,7 +551,7 @@ final class RecordingManager: NSObject, ObservableObject {
             heading: location.course >= 0 ? location.course : nil,
             sessionID: session.sessionID,
             segmentID: session.segmentID,
-            source: "gps",
+            source: source,
             profile: session.profile,
             localDayKey: AppFormatters.localDayKey(for: timestampMs)
         )
@@ -308,6 +596,28 @@ final class RecordingManager: NSObject, ObservableObject {
 extension RecordingManager: CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         Task { @MainActor in
+            if let pendingPersistentProfile {
+                if manager.authorizationStatus == .authorizedAlways {
+                    self.pendingPersistentProfile = nil
+                    startPersistentMonitoringIfAuthorized(profile: pendingPersistentProfile)
+                    return
+                }
+                if manager.authorizationStatus == .authorizedWhenInUse {
+                    status = "Always Location required"
+                    persistentStatus = "Needs Always Location"
+                    return
+                }
+                if manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted {
+                    self.pendingPersistentProfile = nil
+                    persistentRecordingEnabled = false
+                    UserDefaults.standard.set(false, forKey: Self.persistentEnabledKey)
+                    errorMessage = "Always Location is required for persistent recording"
+                    status = "Background permission needed"
+                    persistentStatus = "Permission denied"
+                    return
+                }
+            }
+
             guard let pendingProfile else { return }
             if manager.authorizationStatus == .notDetermined {
                 return
@@ -332,8 +642,18 @@ extension RecordingManager: CLLocationManagerDelegate {
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         Task { @MainActor in
             for location in locations {
-                handle(location)
+                if persistentRecordingEnabled, activeSession?.kind != .manual {
+                    handlePersistentLocation(location)
+                } else {
+                    handle(location)
+                }
             }
+        }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
+        Task { @MainActor in
+            handleVisit(visit)
         }
     }
 

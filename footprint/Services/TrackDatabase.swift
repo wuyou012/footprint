@@ -9,35 +9,45 @@ enum TrackDatabaseError: Error {
 }
 
 final class TrackDatabase {
-    static let shared = TrackDatabase()
+    static let shared: TrackDatabase = {
+        do {
+            return try TrackDatabase()
+        } catch {
+            assertionFailure(error.localizedDescription)
+            return TrackDatabase(initializationError: error)
+        }
+    }()
+
+    private static let schemaVersion = 2
 
     private var db: OpaquePointer?
     private let lock = NSRecursiveLock()
     private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    private let initializationError: Error?
 
-    private init() {
+    init(databaseURL: URL? = nil) throws {
+        initializationError = nil
         var handle: OpaquePointer?
-        do {
-            let url = try Self.databaseURL()
-            if sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
-                let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown SQLite error"
-                db = nil
-                assertionFailure(message)
-                return
-            }
-            db = handle
-            try migrate()
-        } catch {
-            db = nil
-            assertionFailure(error.localizedDescription)
+        let url = try databaseURL ?? Self.defaultDatabaseURL()
+        if sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
+            let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown SQLite error"
+            sqlite3_close(handle)
+            throw TrackDatabaseError.openFailed(message)
         }
+        db = handle
+        try migrate()
+    }
+
+    private init(initializationError: Error) {
+        self.initializationError = initializationError
+        db = nil
     }
 
     deinit {
         sqlite3_close(db)
     }
 
-    private static func databaseURL() throws -> URL {
+    private static func defaultDatabaseURL() throws -> URL {
         guard let supportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             throw TrackDatabaseError.invalidDatabasePath
         }
@@ -47,7 +57,9 @@ final class TrackDatabase {
     }
 
     private var errorMessage: String {
-        db.map { String(cString: sqlite3_errmsg($0)) } ?? "database is not open"
+        db.map { String(cString: sqlite3_errmsg($0)) }
+            ?? initializationError.map { AppFormatters.errorMessage($0) }
+            ?? "database is not open"
     }
 
     private func migrate() throws {
@@ -84,6 +96,8 @@ final class TrackDatabase {
               accepted_count INTEGER NOT NULL DEFAULT 0,
               rejected_count INTEGER NOT NULL DEFAULT 0,
               source TEXT,
+              kind TEXT NOT NULL DEFAULT 'manual',
+              origin TEXT,
               status TEXT,
               local_day_key TEXT,
               timezone_offset_min INTEGER,
@@ -107,8 +121,19 @@ final class TrackDatabase {
             );
             CREATE INDEX IF NOT EXISTS idx_track_segments_session
               ON track_segments (session_id, start_ts);
-            PRAGMA user_version = 1;
             """)
+
+        if try !columnExists(table: "recording_sessions", column: "kind") {
+            try execute("ALTER TABLE recording_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'manual'")
+        }
+        if try !columnExists(table: "recording_sessions", column: "origin") {
+            try execute("ALTER TABLE recording_sessions ADD COLUMN origin TEXT")
+        }
+
+        let currentVersion = try databaseUserVersion()
+        if currentVersion < Self.schemaVersion {
+            try setDatabaseUserVersion(Self.schemaVersion)
+        }
     }
 
     private func execute(_ sql: String) throws {
@@ -183,6 +208,25 @@ final class TrackDatabase {
 
     private func scalarInt(_ sql: String, _ values: [Any?] = []) throws -> Int {
         try query(sql, values) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
+    }
+
+    private func databaseUserVersion() throws -> Int {
+        try scalarInt("PRAGMA user_version")
+    }
+
+    private func setDatabaseUserVersion(_ version: Int) throws {
+        try execute("PRAGMA user_version = \(version)")
+    }
+
+    private func columnExists(table: String, column: String) throws -> Bool {
+        try query("PRAGMA table_info(\(table))") { statement in
+            text(statement, 1)
+        }
+        .contains { $0 == column }
+    }
+
+    func databaseUserVersionForTesting() throws -> Int {
+        try databaseUserVersion()
     }
 
     private func text(_ statement: OpaquePointer?, _ index: Int32) -> String? {
@@ -364,16 +408,24 @@ final class TrackDatabase {
         }
     }
 
-    func startRecordingSession(profile: RecordingProfile, startMs: Int64) throws -> Int64 {
-        try run("""
+    func startRecordingSession(
+        profile: RecordingProfile,
+        startMs: Int64,
+        kind: RecordingSessionKind = .manual,
+        origin: AmbientSessionOrigin? = nil
+    ) throws -> Int64 {
+        let source = kind == .manual ? "foreground" : "ambient"
+        return try run("""
             INSERT INTO recording_sessions (
-              profile, start_ts, source, status, local_day_key,
+              profile, start_ts, source, kind, origin, status, local_day_key,
               timezone_offset_min, created_ts
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [
                 profile.rawValue,
                 startMs,
-                "foreground",
+                source,
+                kind.rawValue,
+                origin?.rawValue,
                 "recording",
                 AppFormatters.localDayKey(for: startMs),
                 AppFormatters.timezoneOffsetMinutes(for: startMs),
@@ -447,7 +499,9 @@ final class TrackDatabase {
     func interruptOpenForegroundSessions(reason: String = "replaced") throws {
         let rows = try query("""
             SELECT id FROM recording_sessions
-            WHERE source = 'foreground' AND status = 'recording'
+            WHERE source = 'foreground'
+              AND kind = 'manual'
+              AND status = 'recording'
             """) { sqlite3_column_int64($0, 0) }
         let now = AppFormatters.nowMs()
         for sessionID in rows {
@@ -476,7 +530,7 @@ final class TrackDatabase {
               MIN(start_ts) AS first_started_at,
               MAX(end_ts) AS last_ended_at
             FROM recording_sessions
-            WHERE source = 'foreground'
+            WHERE kind IN ('manual', 'ambient')
               AND local_day_key IS NOT NULL
               AND (status IS NULL OR status != 'start_failed')
             GROUP BY local_day_key
@@ -496,10 +550,10 @@ final class TrackDatabase {
 
     func loadSessions(for dayKey: String) throws -> [DaySession] {
         try query("""
-            SELECT id, profile, start_ts, end_ts, accepted_count, distance_meters
+            SELECT id, profile, start_ts, end_ts, accepted_count, distance_meters, kind, origin
             FROM recording_sessions
             WHERE local_day_key = ?
-              AND source = 'foreground'
+              AND kind IN ('manual', 'ambient')
               AND (status IS NULL OR status != 'start_failed')
             ORDER BY start_ts ASC
             """, [dayKey]) { statement in
@@ -509,7 +563,9 @@ final class TrackDatabase {
                     startMs: int64(statement, 2),
                     endMs: int64(statement, 3),
                     pointCount: Int(sqlite3_column_int64(statement, 4)),
-                    distanceMeters: sqlite3_column_double(statement, 5)
+                    distanceMeters: sqlite3_column_double(statement, 5),
+                    kind: text(statement, 6).flatMap(RecordingSessionKind.init(rawValue:)) ?? .manual,
+                    origin: text(statement, 7).flatMap(AmbientSessionOrigin.init(rawValue:))
                 )
             }
     }
@@ -525,7 +581,7 @@ final class TrackDatabase {
                 WHERE session_id IN (
                   SELECT id FROM recording_sessions
                   WHERE local_day_key = ?
-                    AND source = 'foreground'
+                    AND kind IN ('manual', 'ambient')
                     AND (status IS NULL OR status != 'start_failed')
                 )
                 ORDER BY ts ASC
@@ -542,7 +598,7 @@ final class TrackDatabase {
               WHERE session_id IN (
                 SELECT id FROM recording_sessions
                 WHERE local_day_key = ?
-                  AND source = 'foreground'
+                  AND kind IN ('manual', 'ambient')
                   AND (status IS NULL OR status != 'start_failed')
               )
             ),
@@ -570,7 +626,7 @@ final class TrackDatabase {
             WHERE session_id IN (
               SELECT id FROM recording_sessions
               WHERE local_day_key = ?
-                AND source = 'foreground'
+                AND kind IN ('manual', 'ambient')
                 AND (status IS NULL OR status != 'start_failed')
             )
             """, [dayKey])
@@ -586,7 +642,7 @@ final class TrackDatabase {
             WHERE session_id IN (
               SELECT id FROM recording_sessions
               WHERE local_day_key = ?
-                AND source = 'foreground'
+                AND kind IN ('manual', 'ambient')
                 AND (status IS NULL OR status != 'start_failed')
             )
             ORDER BY ts ASC
@@ -613,7 +669,7 @@ final class TrackDatabase {
             let sessionFilter = """
                 SELECT id FROM recording_sessions
                 WHERE local_day_key = ?
-                  AND source = 'foreground'
+                  AND kind IN ('manual', 'ambient')
                   AND (status IS NULL OR status != 'start_failed')
                 """
             try run("DELETE FROM track_points WHERE session_id IN (\(sessionFilter))", [dayKey])
@@ -621,7 +677,7 @@ final class TrackDatabase {
             try run("""
                 DELETE FROM recording_sessions
                 WHERE local_day_key = ?
-                  AND source = 'foreground'
+                  AND kind IN ('manual', 'ambient')
                   AND (status IS NULL OR status != 'start_failed')
                 """, [dayKey])
             try execute("COMMIT")
