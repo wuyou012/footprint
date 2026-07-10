@@ -110,7 +110,7 @@ struct RecordView: View {
 
             Spacer()
 
-            if !recorder.recording {
+            if !recorder.recording || recorder.persistentRecordingEnabled {
                 Button(action: onOpenHistory) {
                     Label("History", systemImage: "clock.arrow.circlepath")
                         .labelStyle(.titleAndIcon)
@@ -127,9 +127,37 @@ struct RecordView: View {
         }
     }
 
+    private var persistentControlBar: some View {
+        VStack(spacing: 8) {
+            Text("常驻记录已开启 · \(selectedProfile.label) · 自动后台记录，无需手动 Start")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.9))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity)
+                .background(Color.black.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            Button {
+                setPersistentRecording(false)
+            } label: {
+                Label("关闭常驻记录", systemImage: "stop.circle.fill")
+                    .font(.headline.weight(.bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .background(Color(.systemGray).opacity(0.9))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+    }
+
     private var bottomOverlay: some View {
         VStack(spacing: 12) {
-            if recorder.recording {
+            if recorder.persistentRecordingEnabled {
+                persistentControlBar
+            } else if recorder.recording {
                 RecordStatusPanel(stats: recorder.stats, modeLabel: selectedProfile.label)
                 HStack(spacing: 12) {
                     Button(action: stop) {
