@@ -110,9 +110,36 @@ created: 2026-07-10
 - **OQ-2（常驻 × 手动 Start）— 🅃🄾🄳🄾 先不管**：常驻 ON 时用户再点 Start 高精度录制如何切换/叠加。倾向"手动 Start 临时提权 High，停止落回常驻档"，但**本 feature 暂不处理，记为 todo**。
 - **OQ-3（duty-cycle 周期）**：省电档周期短开 GPS 的开/关时长（Design Gate + dogfood 定）。
 
-## Design Gate（待办）
-架构级（新增常驻服务层 + 三档状态机重构核心 GPS）→ 猫猫讨论技术方案（状态机 / CLVisit 分段数据模型）→ writing-plans + worktree（基于 `main`）。**co-creator 已确认**：三档不变、省电引擎方向、常驻开关入左菜单、省电/普通参数调粗、OQ-1 分组、OQ-2 搁置。
+## 实现计划（Design Gate 产出 · opus 2026-07-10）
+
+> Design Gate 状态：**已过**（co-creator 授权"开始然后传球实现" 2026-07-10）。产品决策全部锁定：三档不变、省电引擎方向、常驻开关入左菜单、省电/普通参数调粗、OQ-1 分组、OQ-2 搁置。以下是给实现（砚砚）的技术蓝图。
+
+### 新增组件（在现有 `RecordingManager` 之上抽常驻协调层，不推翻现有 session 式录制）
+
+| 组件 | 位置 | 职责 |
+|---|---|---|
+| **`MotionGate`** | `Services/` | 封装 `CMMotionActivityManager`，输出 `isStationary` + activity 类型(walking/running/automotive/cycling/unknown) + confidence。纯信号源，可测。 |
+| **`PersistentLocationCoordinator`** | `Services/` | 常驻大脑：注册 SLC (`startMonitoringSignificantLocationChanges`) + Visit (`startMonitoringVisits`)，订阅 MotionGate，跑状态机 `.dormant`(GPS 关，SLC/Visit only) ↔ `.active`(连续 GPS，按档参数)。转移：moving→active；stationary 达档阈值→dormant。 |
+| **`SessionSegmenter`** | `Services/` 或 `TrackDatabase` 内 | 决定新点归哪个 ambient session：**Eco 按 `localDayKey` 切**（跨天开新段）；**Daily/High 按 `CLVisit` 切**（arrival 开段 / departure 结束段）。 |
+| `RecordingProfile` 扩展 | `Models/TrackModels.swift` | 更新三档参数（Eco filter ~200m / Daily ~60m / High 不变 + accuracy 分级）+ 新增常驻阈值（`stationaryTimeoutSeconds` 等）。 |
+
+### 数据模型改动
+- `sessions` 表加 `kind TEXT`（`'manual'` | `'ambient'`）区分手动 vs 常驻自动，**保证 AC-6 不污染手动统计**。
+- 可选 `origin TEXT`（`'visit'` | `'day'`）记录分段依据；CLVisit 起止地点（行程段显示用）可延后到 P6。
+- **migration：user_version bump + 顺带修"无条件 `PRAGMA user_version=1`"bug → 改"读 currentVersion、只升不降"**。
+
+### Phase 拆分（TDD，逐阶段可验收；P1–P4 纯逻辑隔离，最佳起点）
+
+| Phase | 内容 | 验收（先红后绿）|
+|---|---|---|
+| **P1** | `MotionGate`（CMMotion 封装 → stationary/moving 信号）| 单测：mock activity 序列 → 正确 stationary/moving |
+| **P2** | 三档参数更新（Eco 200m / Daily 60m / High 不变 + accuracy 分级 + 常驻阈值）| 单测：各档参数值 |
+| **P3** | `PersistentLocationCoordinator` 状态机（dormant↔active + SLC/Visit 注册 + MotionGate 门控）| 单测：moving→active、stationary timeout→dormant |
+| **P4** | `SessionSegmenter`（Eco 按天 / Daily·High 按 Visit 切段）+ `sessions.kind` + migration（含修 user_version bug）| 单测：分段逻辑 + migration 幂等 |
+| **P5** | 接入 `RecordingManager` + 左菜单 `Toggle`（`RecordSettingsView`）+ Always/Motion 授权引导 + 常驻状态提示 | 模拟器 dogfood：开开关→后台→点出现 |
+| **P6** | 查看兼容（History/DayDetail 显示自动分段）+ 措辞 sessions→行程（可选增强）| dogfood 截图：省电 1 段 / 普通多段正确显示 |
+| **P7** | 真机 dogfood：电量对比 + 被杀唤醒 + 分段验收 | 两组电量数字 + 唤醒截图 |
 
 ## Review
 - 实现：砚砚（缅因猫/gpt）。Review：opus 或第三只猫（**禁止 self-review**）。
-- 门禁：worktree（基于 main）→ TDD → quality-gate → cross-review → merge-gate；真机 dogfood 电量/唤醒/分段查看截图作证据。
+- 门禁：worktree（基于 `main`）→ TDD → quality-gate → cross-review → merge-gate；真机 dogfood 电量/唤醒/分段查看截图作证据。
