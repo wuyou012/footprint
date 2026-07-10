@@ -477,26 +477,30 @@ final class RecordingManager: NSObject, ObservableObject {
 
     private func startAmbientSession(profile: RecordingProfile, startMs: Int64, origin: AmbientSessionOrigin) throws {
         guard activeSession?.kind != .ambient else { return }
-        let sessionID = try store.startRecordingSession(
-            profile: profile,
-            startMs: startMs,
-            kind: .ambient,
-            origin: origin
-        )
-        let segmentID = try store.startTrackSegment(sessionID: sessionID, startMs: startMs)
-        activeSession = ActiveRecordingSession(
-            sessionID: sessionID,
-            segmentID: segmentID,
-            profile: profile,
-            kind: .ambient,
-            origin: origin,
-            startedAtMs: startMs,
-            receivedCount: 0,
-            acceptedCount: 0,
-            rejectedCount: 0,
-            distanceMeters: 0,
-            lastAccepted: nil
-        )
+        if origin == .day {
+            activeSession = try store.startOrResumeAmbientDaySession(profile: profile, timestampMs: startMs)
+        } else {
+            let sessionID = try store.startRecordingSession(
+                profile: profile,
+                startMs: startMs,
+                kind: .ambient,
+                origin: origin
+            )
+            let segmentID = try store.startTrackSegment(sessionID: sessionID, startMs: startMs)
+            activeSession = ActiveRecordingSession(
+                sessionID: sessionID,
+                segmentID: segmentID,
+                profile: profile,
+                kind: .ambient,
+                origin: origin,
+                startedAtMs: startMs,
+                receivedCount: 0,
+                acceptedCount: 0,
+                rejectedCount: 0,
+                distanceMeters: 0,
+                lastAccepted: nil
+            )
+        }
         exportableSessionID = nil
         recording = true
         status = "Persistent \(profile.label) recording"

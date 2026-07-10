@@ -445,6 +445,110 @@ final class TrackDatabase {
             ])
     }
 
+    func startOrResumeAmbientDaySession(profile: RecordingProfile, timestampMs: Int64) throws -> ActiveRecordingSession {
+        let dayKey = AppFormatters.localDayKey(for: timestampMs)
+        if let existing = try loadOpenAmbientDaySession(dayKey: dayKey, fallbackProfile: profile) {
+            return existing
+        }
+
+        let sessionID = try startRecordingSession(
+            profile: profile,
+            startMs: timestampMs,
+            kind: .ambient,
+            origin: .day
+        )
+        let segmentID = try startTrackSegment(sessionID: sessionID, startMs: timestampMs)
+        return ActiveRecordingSession(
+            sessionID: sessionID,
+            segmentID: segmentID,
+            profile: profile,
+            kind: .ambient,
+            origin: .day,
+            startedAtMs: timestampMs,
+            receivedCount: 0,
+            acceptedCount: 0,
+            rejectedCount: 0,
+            distanceMeters: 0,
+            lastAccepted: nil
+        )
+    }
+
+    private func loadOpenAmbientDaySession(dayKey: String, fallbackProfile: RecordingProfile) throws -> ActiveRecordingSession? {
+        let rows = try query("""
+            SELECT id, profile, start_ts, received_count, rejected_count
+            FROM recording_sessions
+            WHERE kind = 'ambient'
+              AND origin = 'day'
+              AND local_day_key = ?
+              AND status = 'recording'
+              AND end_ts IS NULL
+            ORDER BY start_ts ASC
+            LIMIT 1
+            """, [dayKey]) { statement in
+                (
+                    sessionID: sqlite3_column_int64(statement, 0),
+                    profile: text(statement, 1).flatMap(RecordingProfile.init(rawValue:)),
+                    startMs: sqlite3_column_int64(statement, 2),
+                    receivedCount: Int(sqlite3_column_int64(statement, 3)),
+                    rejectedCount: Int(sqlite3_column_int64(statement, 4))
+                )
+            }
+
+        guard let row = rows.first else { return nil }
+        let segmentID = try latestTrackSegmentID(forSessionID: row.sessionID)
+            ?? startTrackSegment(sessionID: row.sessionID, startMs: row.startMs)
+        let lastAccepted = try loadLastTrackPoint(forSessionID: row.sessionID)
+        let acceptedCount = try trackPointCount(forSessionID: row.sessionID)
+        let distanceMeters = try distanceMeters(forSessionID: row.sessionID)
+
+        return ActiveRecordingSession(
+            sessionID: row.sessionID,
+            segmentID: segmentID,
+            profile: row.profile ?? fallbackProfile,
+            kind: .ambient,
+            origin: .day,
+            startedAtMs: row.startMs,
+            receivedCount: max(row.receivedCount, acceptedCount),
+            acceptedCount: acceptedCount,
+            rejectedCount: row.rejectedCount,
+            distanceMeters: distanceMeters,
+            lastAccepted: lastAccepted
+        )
+    }
+
+    private func latestTrackSegmentID(forSessionID sessionID: Int64) throws -> Int64? {
+        try query("""
+            SELECT id
+            FROM track_segments
+            WHERE session_id = ?
+            ORDER BY start_ts DESC
+            LIMIT 1
+            """, [sessionID]) { sqlite3_column_int64($0, 0) }.first
+    }
+
+    private func loadLastTrackPoint(forSessionID sessionID: Int64) throws -> TrackPoint? {
+        try query("""
+            SELECT id, lng, lat, ts, accuracy, speed, altitude, heading,
+              session_id, segment_id, source, profile, local_day_key
+            FROM track_points
+            WHERE session_id = ?
+            ORDER BY ts DESC
+            LIMIT 1
+            """, [sessionID], map: point).first
+    }
+
+    private func distanceMeters(forSessionID sessionID: Int64) throws -> Double {
+        var previous: TrackPoint?
+        var total = 0.0
+        try forEachTrackPoint(forSessionID: sessionID) { point in
+            if let previous {
+                total += LocationFilter.distanceMeters(from: previous, to: point)
+            }
+            previous = point
+        }
+        return total
+    }
+
     func finishRecordingSession(
         sessionID: Int64,
         segmentID: Int64?,

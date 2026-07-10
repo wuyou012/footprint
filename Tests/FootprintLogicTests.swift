@@ -39,6 +39,7 @@ struct FootprintLogicTests {
         try testPersistentCoordinatorStateMachine()
         try testSessionSegmenterPolicies()
         try testDatabaseAmbientSessionSchema()
+        try testDatabaseResumesOpenAmbientDaySession()
         try testMigrationDoesNotDowngradeUserVersion()
         print("FootprintLogicTests passed")
     }
@@ -180,6 +181,39 @@ struct FootprintLogicTests {
         try expect(sessions.contains { $0.kind == .manual }, "Manual session kind should round-trip")
         try expect(sessions.contains { $0.kind == .ambient && $0.origin == .day }, "Ambient session kind and origin should round-trip")
         try expectEqual(try database.databaseUserVersionForTesting(), 2, "Fresh database should migrate to schema version 2")
+    }
+
+    private static func testDatabaseResumesOpenAmbientDaySession() throws {
+        let url = temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let database = try TrackDatabase(databaseURL: url)
+        let startMs = Int64(1_704_067_200_000)
+
+        let first = try database.startOrResumeAmbientDaySession(profile: .eco, timestampMs: startMs)
+        try database.appendTrackPoint(TrackPoint(
+            id: nil,
+            longitude: -122.406,
+            latitude: 37.785,
+            timestampMs: startMs,
+            accuracy: 30,
+            speed: nil,
+            altitude: nil,
+            heading: nil,
+            sessionID: first.sessionID,
+            segmentID: first.segmentID,
+            source: "ambient_gps",
+            profile: .eco,
+            localDayKey: AppFormatters.localDayKey(for: startMs)
+        ))
+
+        let resumed = try database.startOrResumeAmbientDaySession(profile: .eco, timestampMs: startMs + 60_000)
+        try expectEqual(resumed.sessionID, first.sessionID, "Eco restart should reuse the open ambient day session")
+        try expectEqual(resumed.segmentID, first.segmentID, "Eco restart should reuse the open ambient day segment")
+        try expectEqual(resumed.acceptedCount, 1, "Resumed ambient session should restore accepted count")
+        try expect(resumed.lastAccepted != nil, "Resumed ambient session should restore last accepted point")
+
+        let sessions = try database.loadSessions(for: AppFormatters.localDayKey(for: startMs))
+        try expectEqual(sessions.count, 1, "Eco restart should not create a second ambient day session")
     }
 
     private static func testMigrationDoesNotDowngradeUserVersion() throws {
