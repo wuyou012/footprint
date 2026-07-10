@@ -21,6 +21,7 @@ struct RecordView: View {
     @State private var mapDimension: FootprintMapDimension = .twoD
     @State private var poiVisibility: FootprintPOIVisibility = .shown
     @State private var showingSettings = false
+    @State private var recordingPulse = false
 
     var body: some View {
         Group {
@@ -83,6 +84,11 @@ struct RecordView: View {
             .padding(.top, 52)
             .padding(.bottom, 32)
         }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
+                recordingPulse = true
+            }
+        }
     }
 
     private var topOverlay: some View {
@@ -100,14 +106,7 @@ struct RecordView: View {
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .accessibilityLabel("Settings")
 
-            Text(recorder.busy ? "Loading..." : badgeText)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-                .padding(.vertical, 7)
-                .padding(.horizontal, 12)
-                .background(Color.black.opacity(0.72))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            recordingIndicator
 
             Spacer()
 
@@ -175,6 +174,42 @@ struct RecordView: View {
 
             }
         }
+    }
+
+    private var recordingIndicator: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(indicatorDotColor)
+                .frame(width: 10, height: 10)
+                .opacity(recorder.isSampling && recordingPulse ? 0.3 : 1)
+            Text(indicatorText)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+        }
+        .padding(.vertical, 7)
+        .padding(.horizontal, 12)
+        .background(recorder.isSampling ? Color.red.opacity(0.9) : Color.black.opacity(0.72))
+        .clipShape(Capsule())
+    }
+
+    private var indicatorDotColor: Color {
+        if recorder.errorMessage != nil || exportError != nil { return .yellow }
+        if recorder.isSampling { return .white }
+        if recorder.persistentRecordingEnabled { return .orange }
+        return .gray
+    }
+
+    private var indicatorText: String {
+        if recorder.busy { return "Loading…" }
+        if let message = recorder.errorMessage ?? exportError { return message }
+        if recorder.isSampling {
+            return "记录中 · \(recorder.stats.acceptedCount.formatted()) 点"
+        }
+        if recorder.persistentRecordingEnabled {
+            return "常驻待命 · 移动即记录"
+        }
+        return "\(recorder.totalPointCount.formatted()) 已保存"
     }
 
     private var badgeText: String {

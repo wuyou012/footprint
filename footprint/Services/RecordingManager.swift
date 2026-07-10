@@ -16,6 +16,8 @@ final class RecordingManager: NSObject, ObservableObject {
     @Published private(set) var backgroundRecordingEnabled = false
     @Published private(set) var persistentRecordingEnabled: Bool
     @Published private(set) var persistentStatus = "Off"
+    /// True while CLLocationManager is actively sampling GPS (manual or ambient). Drives the on-screen REC indicator.
+    @Published private(set) var isSampling = false
 
     private let locationManager = CLLocationManager()
     private let store = TrackDatabase.shared
@@ -162,6 +164,7 @@ final class RecordingManager: NSObject, ObservableObject {
             locationManager.pausesLocationUpdatesAutomatically = false
             locationManager.showsBackgroundLocationIndicator = false
             locationManager.startUpdatingLocation()
+            isSampling = true
             UIApplication.shared.isIdleTimerDisabled = true
             backgroundRecordingEnabled = true
             recording = true
@@ -189,6 +192,7 @@ final class RecordingManager: NSObject, ObservableObject {
         timer?.invalidate()
         timer = nil
         locationManager.stopUpdatingLocation()
+        isSampling = false
         locationManager.allowsBackgroundLocationUpdates = false
         UIApplication.shared.isIdleTimerDisabled = false
 
@@ -385,6 +389,7 @@ final class RecordingManager: NSObject, ObservableObject {
         locationManager.stopMonitoringSignificantLocationChanges()
         locationManager.stopMonitoringVisits()
         locationManager.stopUpdatingLocation()
+        isSampling = false
         locationManager.allowsBackgroundLocationUpdates = false
         locationManager.pausesLocationUpdatesAutomatically = false
         finishAmbientSession(stopReason: "persistent_off")
@@ -424,6 +429,7 @@ final class RecordingManager: NSObject, ObservableObject {
         locationManager.pausesLocationUpdatesAutomatically = true
         locationManager.allowsBackgroundLocationUpdates = true
         locationManager.startUpdatingLocation()
+        isSampling = true
         persistentStatus = "\(profile.label) sampling"
         status = "Persistent \(profile.label) recording"
     }
@@ -431,6 +437,7 @@ final class RecordingManager: NSObject, ObservableObject {
     private func stopAmbientLocationUpdates() {
         guard persistentRecordingEnabled else { return }
         locationManager.stopUpdatingLocation()
+        isSampling = false
         persistentStatus = "\(persistentProfile.label) ready"
         if persistentProfile.ambientSessionPolicy == .trip {
             finishAmbientSession(stopReason: "stationary")
