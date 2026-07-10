@@ -143,3 +143,19 @@ created: 2026-07-10
 ## Review
 - 实现：砚砚（缅因猫/gpt）。Review：opus 或第三只猫（**禁止 self-review**）。
 - 门禁：worktree（基于 `main`）→ TDD → quality-gate → cross-review → merge-gate；真机 dogfood 电量/唤醒/分段查看截图作证据。
+
+## Review & 验收进度（2026-07-10）
+
+**实现**：砚砚（缅因猫/gpt），分支 `feat/f002-background-persistent-recording`（HEAD `229d4a6`）。
+
+**Cross-review（opus/opus-4-8）**：
+- 🔴 **P1（已修+复审通过）**：省电(eco)档被 SLC 唤醒重启后当天**重复开 ambient session**（违反"一天一段"AC-6）。根因：ambient day session"每 localDayKey 一个 open"不变量只在内存 segmenter、未落 DB restore。
+  - 修复 `229d4a6`：新增 `TrackDatabase.startOrResumeAmbientDaySession`——`.day` origin 先查当天 open session（`kind=ambient AND origin=day AND local_day_key AND status=recording AND end_ts IS NULL`，`LIMIT 1` 处理脏数据），存在则恢复 `ActiveRecordingSession`（含 `lastAccepted`/`acceptedCount`/`distance`/`segmentID` 兜底），不再重复 INSERT。补测 `testDatabaseResumesOpenAmbientDaySession`。
+  - 复审：opus 独立跑 `run-logic-tests.sh` → `FootprintLogicTests passed`。**通过**。
+- 🟡 **P2（归 dogfood 校准，不阻塞代码 review）**：① trip 模式被杀重启切段；② `CLVisit` arrival/departure 未区分；③ `finishAmbientSession` 用 `nowMs()` 而非事件时间戳。真机行为确认后校准。
+
+**Merge 前 pending（真机 dogfood，需 co-creator 真机）**：
+- [ ] **AC-2**：开省电常驻 → 划掉 app → 走动 ≥500m → SLC 唤醒续记，**当天仍 1 段**（同时验证 P1 修复的真机行为）。
+- [ ] **AC-5**：普通档通勤半天电量 vs 现有连续模式对比（两组数字）。
+
+代码 review **通过**；真机 dogfood 完成后进 merge-gate。
