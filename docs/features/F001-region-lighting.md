@@ -199,6 +199,37 @@ for region in 视野内 regions:
 - **远岛 bbox**：含小笠原的 region bbox 巨大 → in-memory 区级 bbox 预筛变弱；多 admin1 region 时应上 per-polygon in-memory 空间索引。
 - **默认 focus**：当前硬编码东京本土；region 增多时改 data-driven（按选中 region 本土 bbox，排除远岛离群）。
 
-### 待 review（branch: `feat/f001-japan-admin1`）
-- 全日本 47 都道府県 admin1：東京都（已亮）+ 其余 46 未点亮 faint 轮廓。数据源同为官方 **国土数値情報 N03 2024（CC BY 4.0）**，从 `N03-20240101_prefecture.geojson` 生成；轻量化参数：`filter-islands min-area=5km2` + `simplify 0.1% keep-shapes`。
-- 当前包体：`city_boundaries.geojson` 约 333KB，48 feature（SF + JP-01..JP-47），229 polygon，13,876 coordinates；iPhone 17 模拟器 dogfood 截图：`/tmp/footprint-f001-japan-admin1-map.png`。
+### 全日本 47 都道府県 admin1（已合入 `692e6e1`，co-creator 验收通过）
+- 東京都（已亮）+ 其余 46 未点亮 faint 轮廓。官方 **国土数値情報 N03 2024（CC BY 4.0）**，从 `N03-20240101_prefecture.geojson` 生成；参数 `filter-islands min-area=5km2` + `simplify 0.1% keep-shapes`。
+- 包体：`city_boundaries.geojson` 约 333KB，48 feature（SF + JP-01..JP-47），229 polygon。
+
+---
+
+## 会话交接 / Resume Guide（2026-07-10）
+
+> **新会话/新猫从这里 resume**：读本文档 + `BACKLOG.md` + `git log --oneline --all` 即满血复活。
+
+### 当前状态（全部已合入 + 已验收）
+F001 成就系统 = **SwiftUI app 的一个 feature**；全日本 47 都道府県 admin1 整块点亮已交付验收。**仓库已重组（2026-07-10）**：
+
+| 分支 | 内容 | HEAD |
+|---|---|---|
+| `main` | **SwiftUI 核心 GPS 记录**（= `apple`，tag `core-gps-checkpoint-2026-07-07`）← 调试核心 checkout 这个 | `5af1c10` |
+| `feature/city-boundary-achievements` | 成就 F001（本 feature）| `8a9063f` |
+| `feature/photo-location-import` | 相册导入（独立 feature）| `2cf9b5f` |
+| `legacy-android` | 最早 RN/Expo 安卓版，遗留保全，不再开发 | `aac56d8` |
+
+tags：`core-gps-checkpoint-2026-07-07`、`f001-tokyo-ward-level-v1`（封存 62 区精细版）。
+
+### 开放待办（codex/砚砚 全仓审核 2026-07-09，无 P0）
+- **P2·核心 migration**（`main` `TrackDatabase.migrate()`）：无条件 `PRAGMA user_version=1`，跨分支切换会把共享 dev DB 从 v3 降回 v1 → 破坏跨分支干净调试。修法：改「读 currentVersion、只升不降」。**最相关于跨分支调试。**
+- **P1·相册可见性**（photo 分支 `TrackMapView.swift:220-227,398-403`）：相机忽略 `photoPoints`，导入照片可能不可见。
+- **P1·相册存储**（photo 分支 `RecordView.swift:24,420-431` + `PhotoLocationExtractor.swift:32-44`）：`@AppStorage` 存整包 JSON，大图库膨胀/失败。
+- **P2·相册权限**（`PhotoLocationExtractor.swift:106-112`）：`.readWrite` 应改 `.readOnly`。
+- F001 自身 debt：见上「追踪 debt」（P4 移除 legacy geocoder / per-polygon 索引 / data-driven focus / 整块↔分区 toggle）。
+
+### 协作分工（怎么传球）
+- **co-creator** = operator，拍价值决策（做哪个 feature / 优先级 / tradeoff）。
+- **opus（布偶猫/opus-4-8）** = 架构设计 + cross-review + 派活。
+- **codex/砚砚（缅因猫/gpt）** = 实现（TDD）。**self-review 铁律**：砚砚写的由 opus/第三只猫 review，反之亦然。
+- 门禁：worktree → TDD → cross-review → merge-gate；**苹果侧无 test target，用 `xcodebuild` + 模拟器 dogfood 截图作证据**。
