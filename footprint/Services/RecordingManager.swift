@@ -374,6 +374,8 @@ final class RecordingManager: NSObject, ObservableObject {
         backgroundRecordingEnabled = true
         persistentStatus = "\(profile.label) ready"
         status = "Persistent \(profile.label) ready"
+        // 起始先记录一次当前位置：用户开启常驻后立刻有起始点，不必等移动才触发第一个点。
+        locationManager.requestLocation()
     }
 
     private func disablePersistentRecording() {
