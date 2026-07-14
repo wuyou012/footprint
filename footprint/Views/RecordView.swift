@@ -43,7 +43,9 @@ struct RecordView: View {
                     exportError: exportError,
                     onBack: { showingSettings = false },
                     onPersistentRecordingChanged: setPersistentRecording,
-                    onExport: exportCurrentTrack
+                    onExport: exportCurrentTrack,
+                    onExportDiagnostics: exportDiagnostics,
+                    onClearDiagnostics: clearDiagnostics
                 )
             } else if recorder.recording && lowPower {
                 LowPowerRecordingView(
@@ -322,6 +324,14 @@ struct RecordView: View {
     private func setPersistentRecording(_ enabled: Bool) {
         exportError = nil
         recorder.setPersistentRecording(enabled, profile: selectedProfile)
+    }
+
+    private func exportDiagnostics() {
+        shareItem = ShareItem(url: DiagnosticLogFile.shared.url)
+    }
+
+    private func clearDiagnostics() {
+        DiagnosticLogFile.shared.clear()
     }
 
     private func stop() {

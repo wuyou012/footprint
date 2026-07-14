@@ -19,6 +19,8 @@ struct RecordSettingsView: View {
     let onBack: () -> Void
     let onPersistentRecordingChanged: (Bool) -> Void
     let onExport: () -> Void
+    let onExportDiagnostics: () -> Void
+    let onClearDiagnostics: () -> Void
 
     var body: some View {
         NavigationStack {
@@ -111,6 +113,22 @@ struct RecordSettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.red)
                     }
+                }
+
+                Section("F002 诊断日志") {
+                    Button {
+                        onExportDiagnostics()
+                    } label: {
+                        Label("导出诊断日志", systemImage: "doc.text.magnifyingglass")
+                    }
+                    Button(role: .destructive) {
+                        onClearDiagnostics()
+                    } label: {
+                        Label("清空诊断日志", systemImage: "trash")
+                    }
+                    Text("常驻记录诊断（CMMotion 决策 / 采集开关 / 记点）。行走后导出发我评估。测试前建议先清空。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Settings")

@@ -35,7 +35,7 @@ final class CoreMotionActivityProvider {
             timestampMs: Int64(activity.startDate.timeIntervalSince1970 * 1000)
         )
         let decision = MotionGate.decision(for: snapshot)
-        FootprintLog.persistent.info("F002 CMMotion kind=\(String(describing: snapshot.kind), privacy: .public) conf=\(String(describing: snapshot.confidence), privacy: .public) -> \(String(describing: decision), privacy: .public)")
+        FootprintLog.diag("CMMotion kind=\(String(describing: snapshot.kind)) conf=\(String(describing: snapshot.confidence)) -> \(String(describing: decision))")
         onDecision?(decision, snapshot.timestampMs)
     }
 
