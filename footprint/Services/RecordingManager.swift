@@ -1,6 +1,7 @@
 import Combine
 import CoreLocation
 import Foundation
+import os
 import UIKit
 
 @MainActor
@@ -372,6 +373,7 @@ final class RecordingManager: NSObject, ObservableObject {
         motionProvider.start()
         #endif
         backgroundRecordingEnabled = true
+        FootprintLog.persistent.info("F002 ✔︎ persistent monitoring started \(profile.label, privacy: .public) (SLC+Visit+Motion)")
         persistentStatus = "\(profile.label) ready"
         status = "Persistent \(profile.label) ready"
         // 起始先记录一次当前位置：用户开启常驻后立刻有起始点，不必等移动才触发第一个点。
@@ -432,6 +434,7 @@ final class RecordingManager: NSObject, ObservableObject {
         locationManager.allowsBackgroundLocationUpdates = true
         locationManager.startUpdatingLocation()
         isSampling = true
+        FootprintLog.persistent.info("F002 ▶︎ start ambient sampling \(profile.label, privacy: .public) filter=\(Int(profile.distanceFilter))m")
         persistentStatus = "\(profile.label) sampling"
         status = "Persistent \(profile.label) recording"
     }
@@ -457,6 +460,7 @@ final class RecordingManager: NSObject, ObservableObject {
         do {
             try ensureAmbientSession(for: timestampMs)
             handle(location, source: "ambient_gps")
+            FootprintLog.persistent.info("F002 • recorded point lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) acc=\(Int(location.horizontalAccuracy))m sampling=\(self.isSampling)")
         } catch {
             errorMessage = AppFormatters.errorMessage(error)
             status = "Persistent write failed"

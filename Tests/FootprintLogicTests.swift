@@ -76,8 +76,13 @@ struct FootprintLogicTests {
         )
         try expectEqual(
             MotionGate.decision(for: MotionActivitySnapshot(kind: .walking, confidence: .low, timestampMs: 1_000)),
+            .moving,
+            "Low-confidence walking should still be treated as moving (avoid dropping walk segments)"
+        )
+        try expectEqual(
+            MotionGate.decision(for: MotionActivitySnapshot(kind: .stationary, confidence: .low, timestampMs: 1_000)),
             .unknown,
-            "Low-confidence movement should stay unknown"
+            "Low-confidence stationary should not force dormant"
         )
     }
 

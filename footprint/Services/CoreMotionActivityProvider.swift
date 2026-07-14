@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 #if canImport(CoreMotion)
 import CoreMotion
@@ -33,7 +34,9 @@ final class CoreMotionActivityProvider {
             confidence: Self.confidence(from: activity.confidence),
             timestampMs: Int64(activity.startDate.timeIntervalSince1970 * 1000)
         )
-        onDecision?(MotionGate.decision(for: snapshot), snapshot.timestampMs)
+        let decision = MotionGate.decision(for: snapshot)
+        FootprintLog.persistent.info("F002 CMMotion kind=\(String(describing: snapshot.kind), privacy: .public) conf=\(String(describing: snapshot.confidence), privacy: .public) -> \(String(describing: decision), privacy: .public)")
+        onDecision?(decision, snapshot.timestampMs)
     }
 
     private static func kind(from activity: CMMotionActivity) -> MotionActivityKind {
