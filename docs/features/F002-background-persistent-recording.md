@@ -159,3 +159,22 @@ created: 2026-07-10
 - [ ] **AC-5**：普通档通勤半天电量 vs 现有连续模式对比（两组数字）。
 
 代码 review **通过**；真机 dogfood 完成后进 merge-gate。
+
+### Dogfood 迭代（2026-07-14 ~ 07-16，opus 实现 + 砚砚 review）
+
+co-creator 真机 dogfood 发现并修复一串问题（feat HEAD `d4935c0`）：
+- `2999c62` 记录指示器（`isSampling` + `recordingIndicator`，解决"看不出在不在记"）
+- `30988be` 开启常驻记起始点（`requestLocation`，站着不动也有起点）
+- `e8be848` 常驻/手动 UI 分离（起始点让 `recording=true` 误触发手动录制 UI）
+- `82edfe8` **MotionGate 放宽**（低置信运动→moving；旧逻辑一刀切丢弃低置信步行）+ 诊断 log
+- `f84223b` 诊断日志文件双写 + app 内导出（co-creator 不能带连线 Xcode 行走）
+- `36802ee` **CLVisit 不再 dormant**（诊断 log 铁证：步行时 iOS 误触发 visit 到达→dormant→停 GPS→app 挂起→整段步行丢失；坐车/地铁速度快不误报所以准）
+- `d4935c0` review P1/P2 修复（坐标不进 public 统一日志用 `.private` redact + 诊断文件 1MB 轮转）
+
+**步行记录丢失根因链（诊断 log 实证）**：① CLVisit 误触发 dormant（14ms / 76s start→stop 铁证）+ ② CMMotion 低置信步行被旧 MotionGate 丢弃。
+
+**Review 闭环**：砚砚 cross-review → P1（精确坐标进 public 统一日志）/ P2（诊断文件无限增长）→ opus 修 `d4935c0` → 砚砚 **focused rereview 通过**。
+
+**Merge 前 pending（真机，需 co-creator）**：
+- [ ] rebuild `d4935c0` 真机重走**纯步行**路线 → 导出新 log 确认：步行段连续 `recorded point`、`⚑ CLVisit arrival` 出现但**不再中断采样**（不再 14ms/76s start→stop）。
+- [ ] AC-5 电量对比（原 pending）。
