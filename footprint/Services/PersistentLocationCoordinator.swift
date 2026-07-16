@@ -45,10 +45,10 @@ struct PersistentLocationCoordinator {
         case .significantLocation:
             return []
         case .visitArrival:
-            guard state == .active else { return [] }
-            state = .dormant
-            stationarySinceMs = nil
-            return [.stopContinuousLocation]
+            // Visit 不再控制记录开关。实测步行时 iOS 频繁误报 visit 到达，旧逻辑会
+            // dormant + 停 GPS → app 被挂起 → 整段步行丢失。记录 active/dormant 只由
+            // 运动门控(CMMotion)决定；visit 仅用于 SessionSegmenter 的 trip 切段。
+            return []
         case .disabled:
             guard state == .active else {
                 stationarySinceMs = nil

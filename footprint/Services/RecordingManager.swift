@@ -547,6 +547,7 @@ final class RecordingManager: NSObject, ObservableObject {
 
     private func handleVisit(_ visit: CLVisit) {
         guard persistentRecordingEnabled else { return }
+        FootprintLog.diag("⚑ CLVisit arrival — recording continues (visit no longer forces dormant)")
         let timestampMs = Int64(Date().timeIntervalSince1970 * 1000)
         let action = ambientSegmenter.action(for: .visitArrival(timestampMs: timestampMs))
         if action == .finishCurrent {

@@ -107,6 +107,12 @@ struct FootprintLogicTests {
         try expectEqual(commands, [.startDutyCycledLocation(profile: .eco)], "Eco moving should duty-cycle location")
         commands = ecoCoordinator.handle(.motion(.stationary, timestampMs: 2_000))
         try expectEqual(commands, [.stopContinuousLocation], "Eco should stop immediately when stationary")
+
+        var visitCoordinator = PersistentLocationCoordinator(profile: .daily)
+        _ = visitCoordinator.handle(.motion(.moving, timestampMs: 1_000))
+        let visitCommands = visitCoordinator.handle(.visitArrival(timestampMs: 2_000))
+        try expect(visitCommands.isEmpty, "Visit arrival must not stop recording (walk-through visits were dropping walk segments)")
+        try expectEqual(visitCoordinator.state, .active, "Visit arrival keeps active; only motion gating controls dormant")
     }
 
     private static func testSessionSegmenterPolicies() throws {
