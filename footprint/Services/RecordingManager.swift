@@ -446,7 +446,9 @@ final class RecordingManager: NSObject, ObservableObject {
         FootprintLog.diag("⏸ stop ambient sampling (dormant/stationary)")
         persistentStatus = "\(persistentProfile.label) ready"
         if persistentProfile.ambientSessionPolicy == .trip {
+            // 方案 A：长静止进 dormant = 一段行程结束；再移动时开新段。
             finishAmbientSession(stopReason: "stationary")
+            ambientSegmenter.endCurrentSegment()
         }
         if activeSession == nil {
             recording = false
@@ -547,13 +549,8 @@ final class RecordingManager: NSObject, ObservableObject {
 
     private func handleVisit(_ visit: CLVisit) {
         guard persistentRecordingEnabled else { return }
-        FootprintLog.diag("⚑ CLVisit arrival — recording continues (visit no longer forces dormant)")
-        let timestampMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let action = ambientSegmenter.action(for: .visitArrival(timestampMs: timestampMs))
-        if action == .finishCurrent {
-            finishAmbientSession(stopReason: "visit_arrival")
-        }
-        applyPersistentCommands(persistentCoordinator.handle(.visitArrival(timestampMs: timestampMs)))
+        // 方案 A：visit 不再影响记录或分段（iOS 步行误报严重）。记录与段边界都由运动门控决定。
+        FootprintLog.diag("⚑ CLVisit ignored (motion gating owns recording + segmentation)")
     }
 
     private func handle(_ location: CLLocation, source: String = "gps") {

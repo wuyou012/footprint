@@ -33,9 +33,9 @@ struct SessionSegmenter {
         case .location(let timestampMs):
             return actionForLocation(timestampMs)
         case .visitArrival:
-            guard profile.ambientSessionPolicy == .trip, currentKey != nil else { return .none }
-            currentKey = nil
-            return .finishCurrent
+            // 方案 A：不再按 visit 切段（iOS 步行误报 visit 造成碎片段）。
+            // 段边界由运动门控的 active/dormant 决定（见 endCurrentSegment）。
+            return .none
         case .disabled:
             guard currentKey != nil else { return .none }
             currentKey = nil
@@ -46,6 +46,11 @@ struct SessionSegmenter {
     mutating func reset() {
         currentKey = nil
         tripIndex = 0
+    }
+
+    /// 运动门控进入 dormant（长静止）时结束当前段；下一次 location 会开新段。
+    mutating func endCurrentSegment() {
+        currentKey = nil
     }
 
     private mutating func actionForLocation(_ timestampMs: Int64) -> SessionSegmentAction {

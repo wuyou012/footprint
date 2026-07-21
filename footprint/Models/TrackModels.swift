@@ -37,7 +37,7 @@ enum RecordingProfile: String, CaseIterable, Identifiable {
     var distanceFilter: CLLocationDistance {
         switch self {
         case .high: 10
-        case .daily: 60
+        case .daily: 30
         case .eco: 200
         }
     }
@@ -53,7 +53,7 @@ enum RecordingProfile: String, CaseIterable, Identifiable {
     var minDistanceMeters: CLLocationDistance {
         switch self {
         case .high: 8
-        case .daily: 55
+        case .daily: 25
         case .eco: 180
         }
     }

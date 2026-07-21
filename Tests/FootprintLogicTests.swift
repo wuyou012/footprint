@@ -46,7 +46,7 @@ struct FootprintLogicTests {
 
     private static func testRecordingProfileAmbientParameters() throws {
         try expectApprox(RecordingProfile.eco.distanceFilter, 200, "Eco distanceFilter should be coarse for ambient recording")
-        try expectApprox(RecordingProfile.daily.distanceFilter, 60, "Daily distanceFilter should be coarser for ambient recording")
+        try expectApprox(RecordingProfile.daily.distanceFilter, 30, "Daily distanceFilter tuned for walking density (plan A)")
         try expectApprox(RecordingProfile.high.distanceFilter, 10, "High distanceFilter should stay precise")
 
         try expectEqual(RecordingProfile.eco.ambientSessionPolicy, .daily, "Eco should group ambient points by day")
@@ -144,11 +144,15 @@ struct FootprintLogicTests {
             "Daily first moving point starts first trip"
         )
         try expectEqual(daily.action(for: .location(timestampMs: sameDay)), .reuseCurrent, "Daily reuses active trip")
-        try expectEqual(daily.action(for: .visitArrival(timestampMs: sameDay)), .finishCurrent, "Visit arrival ends trip")
+        // 方案 A：visit 不再切段（避免 iOS 步行误报 visit 造成碎片段）
+        try expectEqual(daily.action(for: .visitArrival(timestampMs: sameDay)), .none, "Visit no longer ends trip")
+        try expectEqual(daily.action(for: .location(timestampMs: sameDay + 60_000)), .reuseCurrent, "Same trip continues through visit")
+        // 长静止进 dormant 结束段 → 下一个点开新段
+        daily.endCurrentSegment()
         try expectEqual(
-            daily.action(for: .location(timestampMs: sameDay + 60_000)),
+            daily.action(for: .location(timestampMs: sameDay + 120_000)),
             .startNew(origin: .visit, key: "trip-2"),
-            "Daily next movement starts a new trip"
+            "After dormant (endCurrentSegment), next movement starts a new trip"
         )
     }
 
