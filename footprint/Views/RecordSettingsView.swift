@@ -9,6 +9,7 @@ struct RecordSettingsView: View {
     @Binding var mapTintColor: RGBColor
     @Binding var mapTintStrength: Double
     @Binding var trackColor: RGBColor
+    @Binding var showAwardOverlay: Bool
 
     let recording: Bool
     let backgroundRecordingEnabled: Bool
@@ -18,6 +19,7 @@ struct RecordSettingsView: View {
     let exportError: String?
     let onBack: () -> Void
     let onPersistentRecordingChanged: (Bool) -> Void
+    let onOpenAchievements: () -> Void
     let onExport: () -> Void
     let onExportDiagnostics: () -> Void
     let onClearDiagnostics: () -> Void
@@ -98,6 +100,22 @@ struct RecordSettingsView: View {
 
                 Section("Track") {
                     RGBColorEditor(title: "Track color", rgb: $trackColor)
+                }
+
+                Section("Awards") {
+                    Toggle(isOn: $showAwardOverlay) {
+                        Label("主界面显示点亮区域", systemImage: "map.fill")
+                    }
+
+                    Button {
+                        onOpenAchievements()
+                    } label: {
+                        Label("查看点亮成就", systemImage: "trophy.fill")
+                    }
+
+                    Text("主地图叠加未点亮轮廓与已点亮填色；常驻记录写入的点也会参与点亮。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Export") {

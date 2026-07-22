@@ -4,18 +4,38 @@ enum AppRoute: Equatable {
     case record
     case history
     case dayDetail(String)
+    case achievements
+    case achievementMap
 }
 
 struct ContentView: View {
     @StateObject private var recorder = RecordingManager()
-    @State private var route: AppRoute = .record
+    @State private var route: AppRoute
+
+    init() {
+        #if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        let initialRoute: AppRoute
+        if arguments.contains("--region-achievement-map-demo") {
+            initialRoute = .achievementMap
+        } else if arguments.contains("--region-achievement-demo") {
+            initialRoute = .achievements
+        } else {
+            initialRoute = .record
+        }
+        #else
+        let initialRoute: AppRoute = .record
+        #endif
+        _route = State(initialValue: initialRoute)
+    }
 
     var body: some View {
         switch route {
         case .record:
             RecordView(
                 recorder: recorder,
-                onOpenHistory: { route = .history }
+                onOpenHistory: { route = .history },
+                onOpenAchievements: { route = .achievements }
             )
         case .history:
             HistoryView(
@@ -33,6 +53,14 @@ struct ContentView: View {
                     }
                 }
             )
+        case .achievements:
+            RegionAchievementsView(
+                onBack: { route = .record }
+            )
+        case .achievementMap:
+            NavigationStack {
+                RegionAchievementMapView()
+            }
         }
     }
 }

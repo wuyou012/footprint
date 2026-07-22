@@ -1,6 +1,6 @@
 import Foundation
 
-enum AppFormatters {
+nonisolated enum AppFormatters {
     private static let dayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium

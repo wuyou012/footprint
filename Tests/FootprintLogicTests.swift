@@ -39,6 +39,8 @@ struct FootprintLogicTests {
         try testPersistentCoordinatorStateMachine()
         try testSessionSegmenterPolicies()
         try testDatabaseAmbientSessionSchema()
+        try testIntegratedDatabaseSchemaIncludesAmbientAndRegionTables()
+        try testRegionAchievementSamplesIncludeAmbientPoints()
         try testDatabaseResumesOpenAmbientDaySession()
         try testMigrationDoesNotDowngradeUserVersion()
         print("FootprintLogicTests passed")
@@ -195,7 +197,57 @@ struct FootprintLogicTests {
         try expectEqual(sessions.count, 2, "History should include manual and ambient sessions")
         try expect(sessions.contains { $0.kind == .manual }, "Manual session kind should round-trip")
         try expect(sessions.contains { $0.kind == .ambient && $0.origin == .day }, "Ambient session kind and origin should round-trip")
-        try expectEqual(try database.databaseUserVersionForTesting(), 2, "Fresh database should migrate to schema version 2")
+        try expectEqual(try database.databaseUserVersionForTesting(), 3, "Fresh database should migrate to integrated schema version 3")
+    }
+
+    private static func testIntegratedDatabaseSchemaIncludesAmbientAndRegionTables() throws {
+        let url = temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let database = try TrackDatabase(databaseURL: url)
+
+        try expectEqual(try database.databaseUserVersionForTesting(), 3, "Fresh integrated database should migrate to schema version 3")
+        let hasRegions = try sqliteTableExists(at: url, table: "regions")
+        let hasRegionGeometries = try sqliteTableExists(at: url, table: "region_geometries")
+        let hasRegionHits = try sqliteTableExists(at: url, table: "region_hits")
+        let hasRegionRtree = try sqliteTableExists(at: url, table: "region_rtree")
+        let hasSessionKind = try sqliteColumnExists(at: url, table: "recording_sessions", column: "kind")
+        let hasSessionOrigin = try sqliteColumnExists(at: url, table: "recording_sessions", column: "origin")
+        try expect(hasRegions, "Integrated schema should include region catalog table")
+        try expect(hasRegionGeometries, "Integrated schema should include region geometry table")
+        try expect(hasRegionHits, "Integrated schema should include region hit table")
+        try expect(hasRegionRtree, "Integrated schema should include region rtree virtual table")
+        try expect(hasSessionKind, "Integrated schema should keep F002 session kind")
+        try expect(hasSessionOrigin, "Integrated schema should keep F002 session origin")
+    }
+
+    private static func testRegionAchievementSamplesIncludeAmbientPoints() throws {
+        let url = temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let database = try TrackDatabase(databaseURL: url)
+        let timestampMs = Int64(1_704_067_200_000)
+
+        let session = try database.startOrResumeAmbientDaySession(profile: .daily, timestampMs: timestampMs)
+        try database.appendTrackPoint(TrackPoint(
+            id: nil,
+            longitude: 139.767,
+            latitude: 35.681,
+            timestampMs: timestampMs,
+            accuracy: 25,
+            speed: nil,
+            altitude: nil,
+            heading: nil,
+            sessionID: session.sessionID,
+            segmentID: session.segmentID,
+            source: "ambient_gps",
+            profile: .daily,
+            localDayKey: AppFormatters.localDayKey(for: timestampMs)
+        ))
+
+        let samples = try database.loadRegionAchievementTrackSamples()
+        try expectEqual(samples.count, 1, "Region achievement sampling should include ambient track points")
+        try expectApprox(samples[0].latitude, 35.681, "Ambient sample latitude should round-trip")
+        try expectApprox(samples[0].longitude, 139.767, "Ambient sample longitude should round-trip")
+        try expectEqual(samples[0].pointCount, 1, "Ambient sample should carry grouped point count")
     }
 
     private static func testDatabaseResumesOpenAmbientDaySession() throws {
@@ -280,5 +332,55 @@ struct FootprintLogicTests {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown sqlite error"
             throw TestFailure.failed(message)
         }
+    }
+
+    private static func sqliteTableExists(at url: URL, table: String) throws -> Bool {
+        try sqliteScalarInt(
+            at: url,
+            sql: "SELECT COUNT(*) FROM sqlite_master WHERE name = ? AND type IN ('table', 'view')",
+            value: table
+        ) > 0
+    }
+
+    private static func sqliteColumnExists(at url: URL, table: String, column: String) throws -> Bool {
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
+            throw TestFailure.failed("Failed to open sqlite database")
+        }
+        defer { sqlite3_close(handle) }
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "PRAGMA table_info(\(table))", -1, &statement, nil) == SQLITE_OK else {
+            let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown sqlite error"
+            throw TestFailure.failed(message)
+        }
+        defer { sqlite3_finalize(statement) }
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let pointer = sqlite3_column_text(statement, 1) else { continue }
+            if String(cString: pointer) == column {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func sqliteScalarInt(at url: URL, sql: String, value: String) throws -> Int {
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
+            throw TestFailure.failed("Failed to open sqlite database")
+        }
+        defer { sqlite3_close(handle) }
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown sqlite error"
+            throw TestFailure.failed(message)
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, value, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(statement, 0))
     }
 }

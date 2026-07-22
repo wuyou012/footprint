@@ -1,7 +1,7 @@
 import CoreLocation
 import Foundation
 
-enum RecordingProfile: String, CaseIterable, Identifiable {
+nonisolated enum RecordingProfile: String, CaseIterable, Identifiable {
     case high
     case daily
     case eco

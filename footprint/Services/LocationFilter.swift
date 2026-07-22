@@ -14,7 +14,7 @@ enum TrackPointDecision {
     case reject(reason: TrackPointRejectReason, distanceMeters: Double?, elapsedSeconds: TimeInterval?)
 }
 
-enum LocationFilter {
+nonisolated enum LocationFilter {
     private static let earthRadiusMeters = 6_371_008.8
 
     static func distanceMeters(from a: TrackPoint, to b: TrackPoint) -> Double {

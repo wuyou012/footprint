@@ -3,6 +3,7 @@ import SwiftUI
 struct RecordView: View {
     @ObservedObject var recorder: RecordingManager
     let onOpenHistory: () -> Void
+    let onOpenAchievements: () -> Void
 
     @AppStorage("record.selectedProfile") private var selectedProfileRaw = RecordingProfile.daily.rawValue
     @State private var lowPower = false
@@ -16,12 +17,16 @@ struct RecordView: View {
     @AppStorage("record.track.red") private var trackRed = 0
     @AppStorage("record.track.green") private var trackGreen = 158
     @AppStorage("record.track.blue") private var trackBlue = 184
+    @AppStorage("record.awardOverlay.enabled") private var showAwardOverlay = true
 
     @State private var mapStyle: FootprintMapStyle = .standard
     @State private var mapDimension: FootprintMapDimension = .twoD
     @State private var poiVisibility: FootprintPOIVisibility = .shown
     @State private var showingSettings = false
     @State private var recordingPulse = false
+    @State private var awardMapCities: [RegionAchievementMapCity] = []
+
+    private let achievementService = RegionAchievementService()
 
     var body: some View {
         Group {
@@ -35,6 +40,7 @@ struct RecordView: View {
                     mapTintColor: mapTintColorBinding,
                     mapTintStrength: $mapTintStrength,
                     trackColor: trackColorBinding,
+                    showAwardOverlay: $showAwardOverlay,
                     recording: recorder.recording,
                     backgroundRecordingEnabled: recorder.backgroundRecordingEnabled,
                     persistentStatus: recorder.persistentStatus,
@@ -43,6 +49,7 @@ struct RecordView: View {
                     exportError: exportError,
                     onBack: { showingSettings = false },
                     onPersistentRecordingChanged: setPersistentRecording,
+                    onOpenAchievements: openAchievements,
                     onExport: exportCurrentTrack,
                     onExportDiagnostics: exportDiagnostics,
                     onClearDiagnostics: clearDiagnostics
@@ -66,8 +73,9 @@ struct RecordView: View {
     private var mapScene: some View {
         ZStack {
             TrackMapView(
-                points: recorder.points,
+                points: mapDisplayPoints,
                 followLatest: recorder.recording,
+                regionAwardCities: showAwardOverlay ? awardMapCities : [],
                 mapStyle: mapStyle,
                 mapDimension: mapDimension,
                 poiVisibility: poiVisibility,
@@ -75,6 +83,7 @@ struct RecordView: View {
                 mapTintStrength: mapTintStrength,
                 appearance: mapAppearance
             )
+                .id(awardOverlayIdentity)
                 .ignoresSafeArea()
 
             VStack {
@@ -89,6 +98,17 @@ struct RecordView: View {
         .onAppear {
             withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
                 recordingPulse = true
+            }
+        }
+        .task {
+            await loadAwardOverlay()
+        }
+        .onChange(of: recorder.stats.acceptedCount) { _, _ in
+            Task { await loadAwardOverlay() }
+        }
+        .onChange(of: showAwardOverlay) { _, enabled in
+            if enabled {
+                Task { await loadAwardOverlay() }
             }
         }
     }
@@ -113,18 +133,33 @@ struct RecordView: View {
             Spacer()
 
             if !recorder.recording || recorder.persistentRecordingEnabled {
-                Button(action: onOpenHistory) {
-                    Label("History", systemImage: "clock.arrow.circlepath")
-                        .labelStyle(.titleAndIcon)
-                        .font(.caption.weight(.bold))
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 12)
+                VStack(alignment: .trailing, spacing: 8) {
+                    Button(action: onOpenAchievements) {
+                        Label("Awards", systemImage: "trophy.fill")
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption.weight(.bold))
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 12)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .background(Color.black.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .disabled(recorder.busy)
+
+                    Button(action: onOpenHistory) {
+                        Label("History", systemImage: "clock.arrow.circlepath")
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption.weight(.bold))
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 12)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .background(Color.black.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .disabled(recorder.busy)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white)
-                .background(Color.black.opacity(0.72))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .disabled(recorder.busy)
             }
         }
     }
@@ -264,6 +299,25 @@ struct RecordView: View {
         return appearance
     }
 
+    private var mapDisplayPoints: [TrackPoint] {
+        #if DEBUG
+        if showAwardOverlay,
+           !awardMapCities.isEmpty,
+           !recorder.points.isEmpty,
+           recorder.points.allSatisfy({ $0.source == RegionAchievementDemoSeeds.source })
+        {
+            return []
+        }
+        #endif
+        return recorder.points
+    }
+
+    private var awardOverlayIdentity: String {
+        guard showAwardOverlay else { return "award-overlay-off" }
+        let unlockedCount = awardMapCities.filter(\.isUnlocked).count
+        return "award-overlay-\(awardMapCities.count)-\(unlockedCount)"
+    }
+
     private var mapTintColor: RGBColor {
         RGBColor(red: mapTintRed, green: mapTintGreen, blue: mapTintBlue)
     }
@@ -324,6 +378,31 @@ struct RecordView: View {
     private func setPersistentRecording(_ enabled: Bool) {
         exportError = nil
         recorder.setPersistentRecording(enabled, profile: selectedProfile)
+    }
+
+    private func openAchievements() {
+        showingSettings = false
+        onOpenAchievements()
+    }
+
+    @MainActor
+    private func loadAwardOverlay() async {
+        guard showAwardOverlay else {
+            awardMapCities = []
+            FootprintLog.diag("award overlay skipped: disabled")
+            return
+        }
+        do {
+            let cities = try await achievementService.loadAvailableMapCities()
+            awardMapCities = cities
+            FootprintLog.diag(
+                "award overlay loaded: cities=\(cities.count), unlocked=\(cities.filter(\.isUnlocked).count), boundary=\(cities.filter { !$0.boundaryPolygons.isEmpty }.count)"
+            )
+        } catch {
+            // Award overlay is additive; keep recording UI usable if catalog loading fails.
+            awardMapCities = []
+            FootprintLog.diag("award overlay failed: \(AppFormatters.errorMessage(error))")
+        }
     }
 
     private func exportDiagnostics() {

@@ -158,9 +158,24 @@ struct TrackMapAppearance {
     )
 }
 
+private struct RegionAwardOverlayToken: Equatable {
+    let count: Int
+    let unlockedCount: Int
+    let firstID: String?
+    let lastID: String?
+
+    init(cities: [RegionAchievementMapCity]) {
+        count = cities.count
+        unlockedCount = cities.filter(\.isUnlocked).count
+        firstID = cities.first?.id
+        lastID = cities.last?.id
+    }
+}
+
 struct TrackMapView: View {
     let points: [TrackPoint]
     var followLatest = false
+    var regionAwardCities: [RegionAchievementMapCity] = []
     var mapStyle: FootprintMapStyle = .standard
     var mapDimension: FootprintMapDimension = .twoD
     var poiVisibility: FootprintPOIVisibility = .shown
@@ -174,12 +189,14 @@ struct TrackMapView: View {
     private let lastPoint: TrackPoint?
     private let trackRegion: MKCoordinateRegion?
     private let latestToken: TrackChangeToken
+    private let awardOverlayToken: RegionAwardOverlayToken
 
     @State private var position: MapCameraPosition = .region(Self.fallbackRegion)
 
     init(
         points: [TrackPoint],
         followLatest: Bool = false,
+        regionAwardCities: [RegionAchievementMapCity] = [],
         mapStyle: FootprintMapStyle = .standard,
         mapDimension: FootprintMapDimension = .twoD,
         poiVisibility: FootprintPOIVisibility = .shown,
@@ -189,6 +206,7 @@ struct TrackMapView: View {
     ) {
         self.points = points
         self.followLatest = followLatest
+        self.regionAwardCities = regionAwardCities
         self.mapStyle = mapStyle
         self.mapDimension = mapDimension
         self.poiVisibility = poiVisibility
@@ -203,13 +221,14 @@ struct TrackMapView: View {
         )
         self.firstPoint = points.first
         self.lastPoint = points.last
-        self.trackRegion = Self.makeTrackRegion(from: points)
+        self.trackRegion = Self.makeDisplayRegion(points: points, awardCities: regionAwardCities)
         self.latestToken = TrackChangeToken(
             count: points.count,
             lastTimestampMs: points.last?.timestampMs,
             lastLatitude: points.last?.latitude,
             lastLongitude: points.last?.longitude
         )
+        self.awardOverlayToken = RegionAwardOverlayToken(cities: regionAwardCities)
     }
 
     var body: some View {
@@ -222,12 +241,23 @@ struct TrackMapView: View {
         }
         .onAppear { updateCamera() }
         .onChange(of: latestToken) { _, _ in updateCamera(animated: followLatest) }
+        .onChange(of: awardOverlayToken) { _, _ in updateCamera(animated: true) }
         .onChange(of: followLatest) { _, _ in updateCamera(animated: true) }
         .onChange(of: mapDimension) { _, _ in updateCamera(animated: true) }
     }
 
     private var mapContent: some View {
         Map(position: $position) {
+            ForEach(regionAwardCities) { city in
+                ForEach(city.mapBoundaryPolygons) { boundary in
+                    MapPolygon(coordinates: boundary.mapCoordinates)
+                        .foregroundStyle(regionFillColor(for: city).opacity(regionFillOpacity(for: city)))
+
+                    MapPolyline(coordinates: boundary.closedMapCoordinates)
+                        .stroke(regionStrokeColor(for: city).opacity(regionStrokeOpacity(for: city)), lineWidth: city.isUnlocked ? 3.0 : 1.7)
+                }
+            }
+
             ForEach(segments) { segment in
                 MapPolyline(coordinates: segment.coordinates)
                     .stroke(appearance.pathColor, style: StrokeStyle(lineWidth: appearance.lineWidth, lineCap: .round, lineJoin: .round))
@@ -269,6 +299,26 @@ struct TrackMapView: View {
                 .blendMode(.softLight)
                 .allowsHitTesting(false)
         }
+    }
+
+    private func regionFillColor(for city: RegionAchievementMapCity) -> Color {
+        city.isUnlocked
+            ? Color(red: 1.00, green: 0.72, blue: 0.12)
+            : Color(red: 0.04, green: 0.56, blue: 0.66)
+    }
+
+    private func regionStrokeColor(for city: RegionAchievementMapCity) -> Color {
+        city.isUnlocked
+            ? Color(red: 1.00, green: 0.72, blue: 0.12)
+            : Color(red: 0.21, green: 0.96, blue: 1.00)
+    }
+
+    private func regionFillOpacity(for city: RegionAchievementMapCity) -> Double {
+        city.isUnlocked ? 0.40 : 0.07
+    }
+
+    private func regionStrokeOpacity(for city: RegionAchievementMapCity) -> Double {
+        city.isUnlocked ? 0.95 : 0.56
     }
 
     private static func makeSegments(from points: [TrackPoint]) -> [MapSegment] {
@@ -325,6 +375,93 @@ struct TrackMapView: View {
                 longitudeDelta: max(0.01, (maxLon - minLon) * 1.4)
             )
         )
+    }
+
+    private static func makeDisplayRegion(
+        points: [TrackPoint],
+        awardCities: [RegionAchievementMapCity]
+    ) -> MKCoordinateRegion? {
+        let trackRegion = makeTrackRegion(from: points)
+        let awardRegion = makeRegion(from: awardCities)
+
+        #if DEBUG
+        if awardRegion != nil,
+           !points.isEmpty,
+           points.allSatisfy({ $0.source == RegionAchievementDemoSeeds.source })
+        {
+            return awardRegion
+        }
+        #endif
+
+        guard let trackRegion else { return awardRegion }
+        guard let awardRegion else { return trackRegion }
+
+        if trackRegion.span.latitudeDelta > 45 || trackRegion.span.longitudeDelta > 90 {
+            return awardRegion
+        }
+        return trackRegion
+    }
+
+    private static func makeRegion(from cities: [RegionAchievementMapCity]) -> MKCoordinateRegion? {
+        let catalogCities = cities.filter { !$0.boundaryPolygons.isEmpty }
+        let regionCities = catalogCities.isEmpty ? cities : catalogCities
+        let countryOptions = RegionAchievementMapCountryOption.options(for: regionCities)
+        let defaultCountryCode = countryOptions.max { lhs, rhs in
+            if lhs.regionCount != rhs.regionCount {
+                return lhs.regionCount < rhs.regionCount
+            }
+            if lhs.unlockedCount != rhs.unlockedCount {
+                return lhs.unlockedCount < rhs.unlockedCount
+            }
+            return lhs.countryName > rhs.countryName
+        }?.countryCode
+        let countryCities = RegionAchievementMapFilter.countryCities(
+            in: regionCities,
+            countryCode: defaultCountryCode
+        )
+        let visibleCities = overviewCitiesForMainOverlay(in: countryCities)
+        guard let first = visibleCities.first else { return nil }
+        var minLat = first.minLatitude
+        var maxLat = first.maxLatitude
+        var minLon = first.minLongitude
+        var maxLon = first.maxLongitude
+
+        for city in visibleCities.dropFirst() {
+            minLat = min(minLat, city.minLatitude)
+            maxLat = max(maxLat, city.maxLatitude)
+            minLon = min(minLon, city.minLongitude)
+            maxLon = max(maxLon, city.maxLongitude)
+        }
+
+        let center = CLLocationCoordinate2D(
+            latitude: (minLat + maxLat) / 2,
+            longitude: (minLon + maxLon) / 2
+        )
+        return MKCoordinateRegion(
+            center: center,
+            span: MKCoordinateSpan(
+                latitudeDelta: max(0.03, (maxLat - minLat) * 1.35),
+                longitudeDelta: max(0.03, (maxLon - minLon) * 1.35)
+            )
+        )
+    }
+
+    private static func overviewCitiesForMainOverlay(
+        in cities: [RegionAchievementMapCity]
+    ) -> [RegionAchievementMapCity] {
+        guard let focusCity = cities.first(where: \.isUnlocked) else {
+            return RegionAchievementMapFilter.overviewCities(in: cities)
+        }
+        let focusedCities = cities.filter { city in
+            abs(city.centerCoordinate.latitude - focusCity.centerCoordinate.latitude) <= 2.8
+                && longitudeDistance(city.centerCoordinate.longitude, focusCity.centerCoordinate.longitude) <= 2.8
+        }
+        return focusedCities.isEmpty ? [focusCity] : focusedCities
+    }
+
+    private static func longitudeDistance(_ lhs: Double, _ rhs: Double) -> Double {
+        let rawDistance = abs(lhs - rhs)
+        return min(rawDistance, 360 - rawDistance)
     }
 
     private func updateCamera(animated: Bool = false) {

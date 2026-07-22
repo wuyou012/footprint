@@ -8,7 +8,7 @@ enum TrackDatabaseError: Error {
     case invalidDatabasePath
 }
 
-final class TrackDatabase {
+nonisolated final class TrackDatabase {
     static let shared: TrackDatabase = {
         do {
             return try TrackDatabase()
@@ -18,7 +18,7 @@ final class TrackDatabase {
         }
     }()
 
-    private static let schemaVersion = 2
+    private static let schemaVersion = 3
 
     private var db: OpaquePointer?
     private let lock = NSRecursiveLock()
@@ -121,6 +121,95 @@ final class TrackDatabase {
             );
             CREATE INDEX IF NOT EXISTS idx_track_segments_session
               ON track_segments (session_id, start_ts);
+
+            CREATE TABLE IF NOT EXISTS region_achievement_cells (
+              cell_key TEXT PRIMARY KEY,
+              lat REAL NOT NULL,
+              lng REAL NOT NULL,
+              first_point_id INTEGER NOT NULL,
+              first_seen_ts INTEGER,
+              last_seen_ts INTEGER,
+              point_count INTEGER NOT NULL DEFAULT 0,
+              country_code TEXT,
+              country_name TEXT,
+              admin_area TEXT,
+              city_name TEXT,
+              city_key TEXT,
+              resolved_ts INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_region_achievement_cells_city
+              ON region_achievement_cells (city_key);
+
+            CREATE TABLE IF NOT EXISTS region_achievements (
+              city_key TEXT PRIMARY KEY,
+              country_code TEXT NOT NULL,
+              country_name TEXT NOT NULL,
+              admin_area TEXT,
+              city_name TEXT NOT NULL,
+              first_seen_ts INTEGER,
+              last_seen_ts INTEGER,
+              cell_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_region_achievements_country
+              ON region_achievements (country_code, city_name);
+
+            CREATE TABLE IF NOT EXISTS regions (
+              region_id TEXT PRIMARY KEY,
+              level TEXT NOT NULL,
+              datum TEXT NOT NULL,
+              name_zh TEXT NOT NULL,
+              name_en TEXT NOT NULL,
+              country_code TEXT NOT NULL,
+              parent_id TEXT,
+              min_lat REAL NOT NULL,
+              max_lat REAL NOT NULL,
+              min_lng REAL NOT NULL,
+              max_lng REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_regions_country
+              ON regions (country_code, level, region_id);
+
+            CREATE TABLE IF NOT EXISTS region_geometries (
+              region_id TEXT NOT NULL,
+              polygon_index INTEGER NOT NULL,
+              coordinates_blob BLOB NOT NULL,
+              datum TEXT NOT NULL,
+              PRIMARY KEY(region_id, polygon_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS region_geometry_index (
+              id INTEGER PRIMARY KEY,
+              region_id TEXT NOT NULL,
+              polygon_index INTEGER NOT NULL,
+              UNIQUE(region_id, polygon_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_region_geometry_index_region
+              ON region_geometry_index (region_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS region_rtree
+              USING rtree(id, minLat, maxLat, minLng, maxLng);
+
+            CREATE TABLE IF NOT EXISTS region_catalog_metadata (
+              catalog_key TEXT PRIMARY KEY,
+              fingerprint TEXT NOT NULL,
+              region_count INTEGER NOT NULL,
+              updated_ts INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS region_hits (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              region_id TEXT NOT NULL,
+              track_point_id INTEGER,
+              session_id INTEGER,
+              ts INTEGER,
+              lat REAL NOT NULL,
+              lng REAL NOT NULL,
+              accuracy REAL,
+              hit_method TEXT NOT NULL,
+              created_ts INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_region_hits_region_ts
+              ON region_hits (region_id, ts);
             """)
 
         if try !columnExists(table: "recording_sessions", column: "kind") {
@@ -168,6 +257,10 @@ final class TrackDatabase {
                 sqlite3_bind_double(statement, position, value)
             case let value as String:
                 sqlite3_bind_text(statement, position, value, -1, sqliteTransient)
+            case let value as Data:
+                _ = value.withUnsafeBytes { bytes in
+                    sqlite3_bind_blob(statement, position, bytes.baseAddress, Int32(value.count), sqliteTransient)
+                }
             default:
                 sqlite3_bind_null(statement, position)
             }
@@ -244,6 +337,13 @@ final class TrackDatabase {
         sqlite3_column_type(statement, index) == SQLITE_NULL ? nil : sqlite3_column_double(statement, index)
     }
 
+    private func data(_ statement: OpaquePointer?, _ index: Int32) -> Data? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL,
+              let pointer = sqlite3_column_blob(statement, index)
+        else { return nil }
+        return Data(bytes: pointer, count: Int(sqlite3_column_bytes(statement, index)))
+    }
+
     private func point(from statement: OpaquePointer?) -> TrackPoint {
         TrackPoint(
             id: int64(statement, 0),
@@ -317,6 +417,274 @@ final class TrackDatabase {
             ORDER BY ts DESC
             LIMIT 1
             """, map: point).first
+    }
+
+#if DEBUG
+    func seedRegionAchievementDemoTrackPoints() throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try run("DELETE FROM track_points WHERE source = ?", [RegionAchievementDemoSeeds.source])
+            for seed in RegionAchievementDemoSeeds.points {
+                try run("""
+                    INSERT INTO track_points (
+                      lng, lat, ts, accuracy, speed, altitude, heading,
+                      session_id, segment_id, source, profile, local_day_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, [
+                        seed.coordinate.longitude,
+                        seed.coordinate.latitude,
+                        seed.timestampMs,
+                        10.0,
+                        nil,
+                        nil,
+                        nil,
+                        nil,
+                        nil,
+                        RegionAchievementDemoSeeds.source,
+                        RecordingProfile.high.rawValue,
+                        "2026-07-09"
+                    ])
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+#endif
+
+    func loadRegionAchievementTrackSamples(limit: Int = 120_000) throws -> [RegionAchievementTrackCoordinate] {
+        let safeLimit = max(0, min(250_000, limit))
+        guard safeLimit > 0 else { return [] }
+
+        return try query("""
+            WITH samples AS (
+              SELECT
+                CAST(lat * 40 AS INTEGER) AS lat_cell,
+                CAST(lng * 40 AS INTEGER) AS lng_cell,
+                AVG(lat) AS lat,
+                AVG(lng) AS lng,
+                MAX(ts) AS last_seen_ts,
+                MIN(accuracy) AS best_accuracy,
+                COUNT(*) AS point_count
+              FROM track_points
+              WHERE lat BETWEEN -90 AND 90
+                AND lng BETWEEN -180 AND 180
+              GROUP BY lat_cell, lng_cell
+              ORDER BY last_seen_ts DESC
+              LIMIT ?
+            )
+            SELECT lat, lng, last_seen_ts, best_accuracy, point_count
+            FROM samples
+            """, [safeLimit]) { statement in
+                RegionAchievementTrackCoordinate(
+                    latitude: sqlite3_column_double(statement, 0),
+                    longitude: sqlite3_column_double(statement, 1),
+                    timestampMs: sqlite3_column_int64(statement, 2),
+                    accuracy: double(statement, 3),
+                    pointCount: Int(sqlite3_column_int64(statement, 4))
+                )
+            }
+    }
+
+    func replaceRegionCatalog(
+        regions: [Region],
+        geometryByRegionId: [String: [RegionPolygon]],
+        catalogKey: String? = nil,
+        fingerprint: String? = nil
+    ) throws {
+        let encoder = JSONEncoder()
+        lock.lock()
+        defer { lock.unlock() }
+
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try run("DELETE FROM region_rtree")
+            try run("DELETE FROM region_geometry_index")
+            try run("DELETE FROM region_geometries")
+            try run("DELETE FROM regions")
+
+            for region in regions {
+                try run("""
+                    INSERT INTO regions (
+                      region_id, level, datum, name_zh, name_en, country_code,
+                      parent_id, min_lat, max_lat, min_lng, max_lng
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, [
+                        region.regionId,
+                        region.level.rawValue,
+                        region.datum.rawValue,
+                        region.nameZh,
+                        region.nameEn,
+                        region.countryCode.uppercased(),
+                        region.parentId,
+                        region.bbox.minLatitude,
+                        region.bbox.maxLatitude,
+                        region.bbox.minLongitude,
+                        region.bbox.maxLongitude
+                    ])
+
+                let polygons = geometryByRegionId[region.regionId] ?? []
+                for (polygonIndex, polygon) in polygons.enumerated() {
+                    let geometryData = try encoder.encode(polygon)
+                    try run("""
+                        INSERT INTO region_geometries (
+                          region_id, polygon_index, coordinates_blob, datum
+                        ) VALUES (?, ?, ?, ?)
+                        """, [
+                            region.regionId,
+                            polygonIndex,
+                            geometryData,
+                            region.datum.rawValue
+                        ])
+                    let geometryIndexID = try run("""
+                        INSERT INTO region_geometry_index (region_id, polygon_index)
+                        VALUES (?, ?)
+                        """, [
+                            region.regionId,
+                            polygonIndex
+                        ])
+                    let bbox = polygon.bbox
+                    try run("""
+                        INSERT INTO region_rtree (id, minLat, maxLat, minLng, maxLng)
+                        VALUES (?, ?, ?, ?, ?)
+                        """, [
+                            geometryIndexID,
+                            bbox.minLatitude,
+                            bbox.maxLatitude,
+                            bbox.minLongitude,
+                            bbox.maxLongitude
+                        ])
+                }
+            }
+
+            if let catalogKey, let fingerprint {
+                try run("""
+                    INSERT INTO region_catalog_metadata (
+                      catalog_key, fingerprint, region_count, updated_ts
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(catalog_key) DO UPDATE SET
+                      fingerprint = excluded.fingerprint,
+                      region_count = excluded.region_count,
+                      updated_ts = excluded.updated_ts
+                    """, [
+                        catalogKey,
+                        fingerprint,
+                        regions.count,
+                        AppFormatters.nowMs()
+                    ])
+            }
+
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    @discardableResult
+    func replaceRegionCatalogIfNeeded(
+        catalogKey: String,
+        fingerprint: String,
+        regions: [Region],
+        geometryByRegionId: [String: [RegionPolygon]]
+    ) throws -> Bool {
+        if try isRegionCatalogFresh(catalogKey: catalogKey, fingerprint: fingerprint) {
+            return false
+        }
+        try replaceRegionCatalog(
+            regions: regions,
+            geometryByRegionId: geometryByRegionId,
+            catalogKey: catalogKey,
+            fingerprint: fingerprint
+        )
+        return true
+    }
+
+    private func isRegionCatalogFresh(catalogKey: String, fingerprint: String) throws -> Bool {
+        let rows = try query("""
+            SELECT region_count
+            FROM region_catalog_metadata
+            WHERE catalog_key = ? AND fingerprint = ?
+            """, [catalogKey, fingerprint]) { statement in
+                Int(sqlite3_column_int64(statement, 0))
+            }
+        guard let regionCount = rows.first, regionCount > 0 else {
+            return false
+        }
+        let storedRegionCount = try scalarInt("SELECT COUNT(*) FROM regions")
+        let indexedPolygonCount = try scalarInt("SELECT COUNT(*) FROM region_rtree")
+        return storedRegionCount == regionCount && indexedPolygonCount > 0
+    }
+
+    func loadRegionCatalog() throws -> (regions: [Region], geometryByRegionId: [String: [RegionPolygon]]) {
+        let regions = try query("""
+            SELECT region_id, level, datum, name_zh, name_en, country_code,
+              parent_id, min_lat, max_lat, min_lng, max_lng
+            FROM regions
+            ORDER BY region_id ASC
+            """) { statement in
+                Region(
+                    regionId: text(statement, 0) ?? "",
+                    level: text(statement, 1).flatMap(RegionLevel.init(rawValue:)) ?? .city,
+                    datum: text(statement, 2).flatMap(Datum.init(rawValue:)) ?? .wgs84,
+                    bbox: BBox(
+                        minLatitude: sqlite3_column_double(statement, 7),
+                        maxLatitude: sqlite3_column_double(statement, 8),
+                        minLongitude: sqlite3_column_double(statement, 9),
+                        maxLongitude: sqlite3_column_double(statement, 10)
+                    ),
+                    parentId: text(statement, 6),
+                    nameZh: text(statement, 3) ?? "",
+                    nameEn: text(statement, 4) ?? "",
+                    countryCode: text(statement, 5) ?? ""
+                )
+            }
+
+        let decoder = JSONDecoder()
+        let geometryRows = try query("""
+            SELECT region_id, coordinates_blob
+            FROM region_geometries
+            ORDER BY region_id ASC, polygon_index ASC
+            """) { statement in
+                (
+                    regionId: text(statement, 0) ?? "",
+                    polygon: try decoder.decode(RegionPolygon.self, from: data(statement, 1) ?? Data())
+                )
+            }
+        var geometryByRegionId: [String: [RegionPolygon]] = [:]
+        for row in geometryRows where !row.regionId.isEmpty {
+            geometryByRegionId[row.regionId, default: []].append(row.polygon)
+        }
+
+        return (regions, geometryByRegionId)
+    }
+
+    func loadRegionSpatialCandidateIds(
+        for coordinate: Coordinate,
+        padding: Double = 0.0005
+    ) throws -> Set<String> {
+        let rows = try query("""
+            SELECT DISTINCT idx.region_id
+            FROM region_rtree rtree
+            JOIN region_geometry_index idx
+              ON idx.id = rtree.id
+            WHERE rtree.minLat <= ?
+              AND rtree.maxLat >= ?
+              AND rtree.minLng <= ?
+              AND rtree.maxLng >= ?
+            """, [
+                coordinate.latitude + padding,
+                coordinate.latitude - padding,
+                coordinate.longitude + padding,
+                coordinate.longitude - padding
+            ]) { statement in
+                text(statement, 0) ?? ""
+            }
+        return Set(rows.filter { !$0.isEmpty })
     }
 
     func appendTrackPoint(_ point: TrackPoint) throws {
@@ -762,6 +1130,240 @@ final class TrackDatabase {
             } else {
                 throw TrackDatabaseError.stepFailed(errorMessage)
             }
+        }
+    }
+
+    func loadPendingRegionAchievementCells(limit: Int = 28) throws -> [RegionAchievementCandidateCell] {
+        let safeLimit = max(1, min(100, limit))
+        return try query("""
+            WITH cells AS (
+              SELECT
+                CAST(lat * 40 AS INTEGER) || ':' || CAST(lng * 40 AS INTEGER) AS cell_key,
+                CAST(lat * 40 AS INTEGER) AS lat_cell,
+                CAST(lng * 40 AS INTEGER) AS lng_cell,
+                AVG(lat) AS lat,
+                AVG(lng) AS lng,
+                MIN(id) AS first_point_id,
+                MIN(ts) AS first_seen_ts,
+                MAX(ts) AS last_seen_ts,
+                COUNT(*) AS point_count
+              FROM track_points
+              GROUP BY lat_cell, lng_cell
+            )
+            SELECT
+              cells.cell_key,
+              cells.lat,
+              cells.lng,
+              cells.first_point_id,
+              cells.first_seen_ts,
+              cells.last_seen_ts,
+              cells.point_count
+            FROM cells
+            LEFT JOIN region_achievement_cells done
+              ON done.cell_key = cells.cell_key
+            WHERE done.cell_key IS NULL
+            ORDER BY cells.first_point_id ASC
+            LIMIT ?
+            """, [safeLimit]) { statement in
+                RegionAchievementCandidateCell(
+                    cellKey: text(statement, 0) ?? "",
+                    latitude: sqlite3_column_double(statement, 1),
+                    longitude: sqlite3_column_double(statement, 2),
+                    firstPointID: sqlite3_column_int64(statement, 3),
+                    firstSeenMs: sqlite3_column_int64(statement, 4),
+                    lastSeenMs: sqlite3_column_int64(statement, 5),
+                    pointCount: Int(sqlite3_column_int64(statement, 6))
+                )
+            }
+    }
+
+    func hasPendingRegionAchievementCells() throws -> Bool {
+        try !loadPendingRegionAchievementCells(limit: 1).isEmpty
+    }
+
+    @discardableResult
+    func saveRegionAchievementCell(
+        _ cell: RegionAchievementCandidateCell,
+        place: RegionAchievementResolvedPlace?
+    ) throws -> Bool {
+        let cityAlreadyExists: Bool
+        if let place {
+            cityAlreadyExists = try scalarInt("SELECT COUNT(*) FROM region_achievements WHERE city_key = ?", [place.cityKey]) > 0
+        } else {
+            cityAlreadyExists = true
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try run("""
+                INSERT OR REPLACE INTO region_achievement_cells (
+                  cell_key, lat, lng, first_point_id, first_seen_ts,
+                  last_seen_ts, point_count, country_code, country_name,
+                  admin_area, city_name, city_key, resolved_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, [
+                    cell.cellKey,
+                    cell.latitude,
+                    cell.longitude,
+                    cell.firstPointID,
+                    cell.firstSeenMs,
+                    cell.lastSeenMs,
+                    cell.pointCount,
+                    place?.countryCode,
+                    place?.countryName,
+                    place?.adminArea,
+                    place?.cityName,
+                    place?.cityKey,
+                    AppFormatters.nowMs()
+                ])
+
+            if let place {
+                try run("""
+                    INSERT INTO region_achievements (
+                      city_key, country_code, country_name, admin_area,
+                      city_name, first_seen_ts, last_seen_ts, cell_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(city_key) DO UPDATE SET
+                      country_name = excluded.country_name,
+                      admin_area = excluded.admin_area,
+                      city_name = excluded.city_name,
+                      first_seen_ts = MIN(region_achievements.first_seen_ts, excluded.first_seen_ts),
+                      last_seen_ts = MAX(region_achievements.last_seen_ts, excluded.last_seen_ts),
+                      cell_count = region_achievements.cell_count + 1
+                    """, [
+                        place.cityKey,
+                        place.countryCode,
+                        place.countryName,
+                        place.adminArea,
+                        place.cityName,
+                        cell.firstSeenMs,
+                        cell.lastSeenMs
+                    ])
+            }
+
+            try execute("COMMIT")
+            return place != nil && !cityAlreadyExists
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func loadRegionAchievements() throws -> [RegionAchievementCountry] {
+        let cities = try query("""
+            SELECT
+              city_key, country_code, country_name, admin_area, city_name,
+              first_seen_ts, last_seen_ts, cell_count
+            FROM region_achievements
+            ORDER BY country_name COLLATE NOCASE ASC,
+              city_name COLLATE NOCASE ASC
+            """) { statement in
+                RegionAchievementCity(
+                    cityKey: text(statement, 0) ?? "",
+                    countryCode: text(statement, 1) ?? "",
+                    countryName: text(statement, 2) ?? "",
+                    adminArea: text(statement, 3),
+                    cityName: text(statement, 4) ?? "",
+                    firstSeenMs: int64(statement, 5),
+                    lastSeenMs: int64(statement, 6),
+                    cellCount: Int(sqlite3_column_int64(statement, 7))
+                )
+            }
+
+        var order: [String] = []
+        var grouped: [String: (name: String, cities: [RegionAchievementCity])] = [:]
+        for city in cities {
+            if grouped[city.countryCode] == nil {
+                order.append(city.countryCode)
+                grouped[city.countryCode] = (city.countryName, [])
+            }
+            grouped[city.countryCode]?.cities.append(city)
+        }
+
+        return order.compactMap { countryCode in
+            guard let group = grouped[countryCode] else { return nil }
+            return RegionAchievementCountry(
+                countryCode: countryCode,
+                countryName: group.name,
+                cities: group.cities
+            )
+        }
+    }
+
+    func loadRegionAchievementMapCities() throws -> [RegionAchievementMapCity] {
+        let cellPaddingDegrees = 0.0125
+        let rows = try query("""
+            SELECT
+              achievement.city_key,
+              achievement.country_code,
+              achievement.country_name,
+              achievement.admin_area,
+              achievement.city_name,
+              MIN(cell.lat) AS min_lat,
+              MAX(cell.lat) AS max_lat,
+              MIN(cell.lng) AS min_lng,
+              MAX(cell.lng) AS max_lng,
+              COUNT(cell.cell_key) AS cell_count
+            FROM region_achievements achievement
+            JOIN region_achievement_cells cell
+              ON cell.city_key = achievement.city_key
+            GROUP BY
+              achievement.city_key,
+              achievement.country_code,
+              achievement.country_name,
+              achievement.admin_area,
+              achievement.city_name
+            ORDER BY achievement.country_name COLLATE NOCASE ASC,
+              achievement.city_name COLLATE NOCASE ASC
+            """) { statement in
+                (
+                    cityKey: text(statement, 0) ?? "",
+                    countryCode: text(statement, 1) ?? "",
+                    countryName: text(statement, 2) ?? "",
+                    adminArea: text(statement, 3),
+                    cityName: text(statement, 4) ?? "",
+                    minLatitude: sqlite3_column_double(statement, 5) - cellPaddingDegrees,
+                    maxLatitude: sqlite3_column_double(statement, 6) + cellPaddingDegrees,
+                    minLongitude: sqlite3_column_double(statement, 7) - cellPaddingDegrees,
+                    maxLongitude: sqlite3_column_double(statement, 8) + cellPaddingDegrees,
+                    cellCount: Int(sqlite3_column_int64(statement, 9))
+                )
+            }
+
+        return rows.enumerated().map { index, row in
+            RegionAchievementMapCity(
+                cityKey: row.cityKey,
+                regionId: nil,
+                countryCode: row.countryCode,
+                countryName: row.countryName,
+                adminArea: row.adminArea,
+                cityName: row.cityName,
+                minLatitude: row.minLatitude,
+                maxLatitude: row.maxLatitude,
+                minLongitude: row.minLongitude,
+                maxLongitude: row.maxLongitude,
+                cellCount: row.cellCount,
+                colorIndex: index,
+                isUnlocked: true,
+                cityKeyAliases: [],
+                boundaryPolygons: []
+            )
+        }
+    }
+
+    func clearRegionAchievements() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try run("DELETE FROM region_achievement_cells")
+            try run("DELETE FROM region_achievements")
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
         }
     }
 
