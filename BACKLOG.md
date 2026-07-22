@@ -13,7 +13,8 @@ created: 2026-07-08
 | ID | Name | Status | Branch | Owner | Link |
 |----|------|--------|--------|-------|------|
 | F001 | Region Lighting（城市点亮）| in-progress · 全日本 47 都道府県 admin1 已合入(`692e6e1`) | city | 砚砚（实现）/ opus（设计）| [F001](features/F001-region-lighting.md)¹ |
-| F002 | Background Persistent Recording（后台常驻 + 三档省电）| spec · 立项 2026-07-10；三档参数+分组+分段查看已定，待 Design Gate | **main** | 砚砚（实现）/ opus（设计）| [F002](features/F002-background-persistent-recording.md) |
+| F002 | Background Persistent Recording（后台常驻 + 三档省电）| in-progress · 实现完成(`feat/f002` `d7e0c6d`) + cross-review 通过；dogfood 修一串(指示器/起始点/UI分离/MotionGate放宽/CLVisit去dormant/方案A分段)，co-creator 真机实测中 | feat/f002 | 砚砚（实现）/ opus（设计）| [F002](features/F002-background-persistent-recording.md) |
+| F003 | Award 集成（F001点亮 ⊕ F002常驻 + 主界面显示点亮区域）| spec · 立项 2026-07-22；集成策略+分阶段计划已定，传球砚砚实现 | 集成分支(基于 feat/f002) | 砚砚（实现）/ opus（设计）| [F003](features/F003-award-integration.md) |
 
 ¹ F001 spec 文档在 `feature/city-boundary-achievements` 分支（点亮 feature 的家）。
 
@@ -21,9 +22,11 @@ created: 2026-07-08
 
 > co-creator 决策记录（2026-07-10），到点再走 feat-lifecycle 立项。
 
-- **F003 候选 · 全球点亮 + 换色**（任务1，顺序第二，归 city 分支）：全球 admin1；换色（点亮填色 + 边界描边色）；渲染/内存 = 重启 DB R*Tree + viewport 裁剪 + zoom LOD。
+> 注：F003 已用于 Award 集成（2026-07-22 立项）；以下候选 F 号在正式立项时分配。
+
+- **候选 · 全球点亮 + 换色**（任务1，归点亮线）：全球 admin1；换色（点亮填色 + 边界描边色）；渲染/内存 = 重启 DB R*Tree + viewport 裁剪 + zoom LOD。
   - TODO：**admin2（中国地级市）先不做**，V0 只到 admin1。
-- **F004 候选 · 行程导入：航班 + 高铁**（任务3，顺序第三，**暂搁置待议**）：导入用户真实行程渲染轨迹。调研结论：12306/携程/飞猪无开放行程 API；航班走 BCBP 登机牌扫码，几何用 OpenFlights 大圆 / OSM 高铁线。
+- **候选 · 行程导入：航班 + 高铁**（任务3，**暂搁置待议**）：导入用户真实行程渲染轨迹。调研结论：12306/携程/飞猪无开放行程 API；航班走 BCBP 登机牌扫码，几何用 OpenFlights 大圆 / OSM 高铁线。
   - 已定：**先做手动输入 + 扫码**；**邮件解析可做**（之后讨论）；**不做短信**；先航班后高铁。
   - 待议：高铁几何保真 / 付费第三方车次 API / 点亮交互（**不点亮或可选，优先级最低，2·1·3 完成后再议**）。
 
