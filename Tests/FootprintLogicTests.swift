@@ -41,6 +41,7 @@ struct FootprintLogicTests {
         try testDatabaseAmbientSessionSchema()
         try testIntegratedDatabaseSchemaIncludesAmbientAndRegionTables()
         try testRegionAchievementSamplesIncludeAmbientPoints()
+        try testCityBoundaryCatalogCachesDecodedCities()
         try testDatabaseResumesOpenAmbientDaySession()
         try testMigrationDoesNotDowngradeUserVersion()
         print("FootprintLogicTests passed")
@@ -250,6 +251,19 @@ struct FootprintLogicTests {
         try expectEqual(samples[0].pointCount, 1, "Ambient sample should carry grouped point count")
     }
 
+    private static func testCityBoundaryCatalogCachesDecodedCities() throws {
+        let loader = CountingDataLoader(data: Data(Self.minimalCityBoundaryGeoJSON.utf8))
+        let catalog = CityBoundaryCatalog(loader: { @Sendable in try loader.load() })
+
+        let firstLoad = try catalog.loadCities()
+        let secondLoad = try catalog.loadCities()
+
+        try expectEqual(loader.count, 1, "City boundary catalog should decode static bundle data once")
+        try expectEqual(firstLoad, secondLoad, "Cached city boundary load should return the same cities")
+        try expectEqual(firstLoad.count, 1, "Minimal city boundary fixture should decode one city")
+        try expectEqual(firstLoad[0].regionId, "JP-13", "City boundary region id should normalize to canonical format")
+    }
+
     private static func testDatabaseResumesOpenAmbientDaySession() throws {
         let url = temporaryDatabaseURL()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -382,5 +396,55 @@ struct FootprintLogicTests {
 
         guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private static let minimalCityBoundaryGeoJSON = """
+        {
+          "features": [
+            {
+              "properties": {
+                "id": "jp_13",
+                "countryCode": "JP",
+                "countryName": "Japan",
+                "adminArea": "Tokyo",
+                "cityName": "Tokyo"
+              },
+              "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                  [
+                    [139.0, 35.0],
+                    [140.0, 35.0],
+                    [140.0, 36.0],
+                    [139.0, 35.0]
+                  ]
+                ]
+              }
+            }
+          ]
+        }
+        """
+}
+
+private final class CountingDataLoader: @unchecked Sendable {
+    private let data: Data
+    private let lock = NSLock()
+    private var loadCount = 0
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return loadCount
+    }
+
+    func load() throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        loadCount += 1
+        return data
     }
 }

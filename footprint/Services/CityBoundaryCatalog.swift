@@ -1,23 +1,37 @@
 import Foundation
 
-struct CityBoundaryCatalog: Sendable {
+nonisolated struct CityBoundaryCatalog: Sendable {
     enum CatalogError: Error {
         case missingResource
     }
 
-    private let resourceName = "city_boundaries"
-    private let resourceExtension = "geojson"
+    private static let sharedCache = Cache()
+    private let loader: @Sendable () throws -> Data
+    private let cache: Cache
 
-    nonisolated init() {}
+    nonisolated init(resourceName: String = "city_boundaries", resourceExtension: String = "geojson") {
+        self.loader = {
+            guard let url = Bundle.main.url(forResource: resourceName, withExtension: resourceExtension) else {
+                throw CatalogError.missingResource
+            }
+            return try Data(contentsOf: url)
+        }
+        self.cache = Self.sharedCache
+    }
+
+    nonisolated init(loader: @escaping @Sendable () throws -> Data) {
+        self.loader = loader
+        self.cache = Cache()
+    }
 
     nonisolated func loadCities() throws -> [RegionAchievementMapCity] {
-        guard let url = Bundle.main.url(forResource: resourceName, withExtension: resourceExtension) else {
-            throw CatalogError.missingResource
+        try cache.loadCities(loader: loader) { data in
+            try Self.decodeCities(from: data)
         }
+    }
 
-        let data = try Data(contentsOf: url)
+    nonisolated private static func decodeCities(from data: Data) throws -> [RegionAchievementMapCity] {
         let collection = try JSONDecoder().decode(FeatureCollection.self, from: data)
-
         return collection.features.enumerated().compactMap { index, feature in
             let polygons = feature.geometry.boundaryPolygons(featureID: feature.properties.id)
             guard !polygons.isEmpty else { return nil }
@@ -49,6 +63,26 @@ struct CityBoundaryCatalog: Sendable {
                 cityKeyAliases: feature.properties.aliases.map(Self.normalizedCityKey),
                 boundaryPolygons: polygons
             )
+        }
+    }
+
+    nonisolated private final class Cache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cities: [RegionAchievementMapCity]?
+
+        func loadCities(
+            loader: @Sendable () throws -> Data,
+            decoder: (Data) throws -> [RegionAchievementMapCity]
+        ) throws -> [RegionAchievementMapCity] {
+            lock.lock()
+            defer { lock.unlock() }
+            if let cities {
+                return cities
+            }
+
+            let decodedCities = try decoder(loader())
+            cities = decodedCities
+            return decodedCities
         }
     }
 

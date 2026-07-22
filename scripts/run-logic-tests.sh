@@ -18,6 +18,7 @@ swiftc \
   "$ROOT/footprint/Services/PersistentLocationCoordinator.swift" \
   "$ROOT/footprint/Services/SessionSegmenter.swift" \
   "$ROOT/footprint/Services/TrackDatabase.swift" \
+  "$ROOT/footprint/Services/CityBoundaryCatalog.swift" \
   "$ROOT/Tests/FootprintLogicTests.swift" \
   -lsqlite3 \
   -o "$OUT"

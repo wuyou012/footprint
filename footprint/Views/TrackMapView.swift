@@ -193,6 +193,22 @@ struct TrackMapView: View {
 
     @State private var position: MapCameraPosition = .region(Self.fallbackRegion)
 
+    // Keep real tracks primary; use award overview only for empty or continent-scale tracks.
+    private static let trackRegionMinimumSpan = 0.01
+    private static let trackRegionPaddingMultiplier = 1.4
+    private static let sparseTrackLatitudeThreshold = 45.0
+    private static let sparseTrackLongitudeThreshold = 90.0
+    private static let awardRegionMinimumSpan = 0.03
+    private static let awardRegionPaddingMultiplier = 1.35
+    private static let unlockedCityNeighborhoodDegrees = 2.8
+    private static let fallbackRegionSpan = 0.08
+    private static let liveRegionSpan = 0.006
+    private static let metersPerLatitudeDegree = 111_000.0
+    private static let minimumLongitudeScale = 0.25
+    private static let minimumCameraDistance: CLLocationDistance = 450
+    private static let maximumCameraDistance: CLLocationDistance = 80_000
+    private static let cameraDistanceMultiplier = 2.1
+
     init(
         points: [TrackPoint],
         followLatest: Bool = false,
@@ -371,8 +387,8 @@ struct TrackMapView: View {
         return MKCoordinateRegion(
             center: center,
             span: MKCoordinateSpan(
-                latitudeDelta: max(0.01, (maxLat - minLat) * 1.4),
-                longitudeDelta: max(0.01, (maxLon - minLon) * 1.4)
+                latitudeDelta: max(trackRegionMinimumSpan, (maxLat - minLat) * trackRegionPaddingMultiplier),
+                longitudeDelta: max(trackRegionMinimumSpan, (maxLon - minLon) * trackRegionPaddingMultiplier)
             )
         )
     }
@@ -384,19 +400,12 @@ struct TrackMapView: View {
         let trackRegion = makeTrackRegion(from: points)
         let awardRegion = makeRegion(from: awardCities)
 
-        #if DEBUG
-        if awardRegion != nil,
-           !points.isEmpty,
-           points.allSatisfy({ $0.source == RegionAchievementDemoSeeds.source })
-        {
-            return awardRegion
-        }
-        #endif
-
         guard let trackRegion else { return awardRegion }
         guard let awardRegion else { return trackRegion }
 
-        if trackRegion.span.latitudeDelta > 45 || trackRegion.span.longitudeDelta > 90 {
+        if trackRegion.span.latitudeDelta > sparseTrackLatitudeThreshold
+            || trackRegion.span.longitudeDelta > sparseTrackLongitudeThreshold
+        {
             return awardRegion
         }
         return trackRegion
@@ -440,8 +449,8 @@ struct TrackMapView: View {
         return MKCoordinateRegion(
             center: center,
             span: MKCoordinateSpan(
-                latitudeDelta: max(0.03, (maxLat - minLat) * 1.35),
-                longitudeDelta: max(0.03, (maxLon - minLon) * 1.35)
+                latitudeDelta: max(awardRegionMinimumSpan, (maxLat - minLat) * awardRegionPaddingMultiplier),
+                longitudeDelta: max(awardRegionMinimumSpan, (maxLon - minLon) * awardRegionPaddingMultiplier)
             )
         )
     }
@@ -453,8 +462,8 @@ struct TrackMapView: View {
             return RegionAchievementMapFilter.overviewCities(in: cities)
         }
         let focusedCities = cities.filter { city in
-            abs(city.centerCoordinate.latitude - focusCity.centerCoordinate.latitude) <= 2.8
-                && longitudeDistance(city.centerCoordinate.longitude, focusCity.centerCoordinate.longitude) <= 2.8
+            abs(city.centerCoordinate.latitude - focusCity.centerCoordinate.latitude) <= unlockedCityNeighborhoodDegrees
+                && longitudeDistance(city.centerCoordinate.longitude, focusCity.centerCoordinate.longitude) <= unlockedCityNeighborhoodDegrees
         }
         return focusedCities.isEmpty ? [focusCity] : focusedCities
     }
@@ -504,23 +513,23 @@ struct TrackMapView: View {
     private static let fallbackCenter = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
     private static let fallbackRegion = MKCoordinateRegion(
         center: fallbackCenter,
-        span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
+        span: MKCoordinateSpan(latitudeDelta: fallbackRegionSpan, longitudeDelta: fallbackRegionSpan)
     )
 
     private static func liveRegion(centeredAt coordinate: CLLocationCoordinate2D) -> MKCoordinateRegion {
         MKCoordinateRegion(
             center: coordinate,
-            span: MKCoordinateSpan(latitudeDelta: 0.006, longitudeDelta: 0.006)
+            span: MKCoordinateSpan(latitudeDelta: liveRegionSpan, longitudeDelta: liveRegionSpan)
         )
     }
 
     private static func cameraDistance(for region: MKCoordinateRegion) -> CLLocationDistance {
-        let latitudeMeters = region.span.latitudeDelta * 111_000
+        let latitudeMeters = region.span.latitudeDelta * metersPerLatitudeDegree
         let longitudeMeters = region.span.longitudeDelta
-            * 111_000
-            * max(0.25, cos(region.center.latitude * .pi / 180))
+            * metersPerLatitudeDegree
+            * max(minimumLongitudeScale, cos(region.center.latitude * .pi / 180))
         let visibleMeters = max(latitudeMeters, longitudeMeters)
-        return min(80_000, max(450, visibleMeters * 2.1))
+        return min(maximumCameraDistance, max(minimumCameraDistance, visibleMeters * cameraDistanceMultiplier))
     }
 
     private static func canRenderMap(size: CGSize) -> Bool {
