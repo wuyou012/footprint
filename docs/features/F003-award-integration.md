@@ -77,3 +77,18 @@ created: 2026-07-22
 ## Review
 - 实现：砚砚（缅因猫/gpt）。Review：opus 或第三只猫（**禁止 self-review**）。
 - 门禁：集成分支（基于 `feat/f002`）→ TDD → quality-gate → cross-review → merge-gate；**模拟器截图验收**（award/点亮可模拟器测）。
+
+## 进度：集成 + 全球一级边界（2026-07-22 ~ 07-23）
+
+### P1–P3 集成（`feat/f003-award-integration`，cross-review 通过）
+`41f01ff` 集成 F001 点亮 ⊕ F002 常驻 + 主界面 overlay + 常驻联动点亮 → review 提 P1(catalog 每点重解析)/P2(死代码) → `97ac68b` 修（load-once 缓存）→ **rereview 通过**。migration v3 合并（region 表 + kind/origin，只升不降）、F002 零回归（字节级）、DEBUG seed release 干净。
+
+### 全球一级边界扩展（`02d3cca`，cross-review 通过）
+award 从"仅日本 47 admin1"扩到**全球一级行政区**。数据源 **Natural Earth Admin 1 10m v5.1.1**（public domain），简化 2%，`mapshaper@0.7.47` pin + VERSION 校验 + 产物写 provenance；日本保留 MLIT 47 都道府县。最终 4461 admin1 / 239 国家 / 4.4MB。
+
+**🔴 中国政策 override（co-creator 决策 2026-07-23，opus flag）**：Natural Earth 是 de facto 边界，对中国画法不符官方立场 → 修正：**台湾** `TW-*` 21 县市折叠为一个中国 admin1 `CN-TW`（台湾省）；**藏南** `IN-AR` 从印度侧剔除、几何并入 `CN-XZ`（西藏），metadata 记 `sourceComponentRegionIds`。
+> ⚠️ **合规注记（承接 F001）**：这是基于 Natural Earth 几何的 Footprint 中国政策 override，**非公开发布/上架所需的官方审图数据源**。个人自用 + 当前 dogfood 足够；**未来公开发布仍需单独合规轨**（compliant 数据源 + 审图号）。港澳(HK/MO)单列、南海诸岛未处理，同属公开前待办。
+
+**性能修复（P1，和 F002 省电目标冲突）**：4482 region 每点全量重算 → 接上已建的 R*Tree 预筛（`loadRegionSpatialCandidateIds` 死代码激活）+ `provider.catalog()` 快照（消 O(n²)）+ matcher memoize（fingerprint gate）+ `RecordView` 按 10 点批量 reload（`AwardOverlayReloadPolicy` 治本触发门控）。
+
+**Merge 前 pending**：F003 基于 `feat/f002`，merge 带 F002 → 等 co-creator F002 方案A 实机优化稳定后一起 merge。
