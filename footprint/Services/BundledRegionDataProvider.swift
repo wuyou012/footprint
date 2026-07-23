@@ -6,25 +6,34 @@ nonisolated struct BundledRegionDataProvider: RegionDataProvider {
         case missingGeometry(String)
     }
 
+    private static let sharedCache = Cache()
     private let loader: @Sendable () throws -> Data
+    private let cache: Cache
 
     init(resourceName: String = "city_boundaries", resourceExtension: String = "geojson") {
-        loader = {
+        self.loader = {
             guard let url = Bundle.main.url(forResource: resourceName, withExtension: resourceExtension) else {
                 throw ProviderError.missingResource
             }
             return try Data(contentsOf: url)
         }
+        self.cache = Self.sharedCache
     }
 
     init(url: URL) {
-        loader = {
+        self.loader = {
             try Data(contentsOf: url)
         }
+        self.cache = Cache()
+    }
+
+    init(loader: @escaping @Sendable () throws -> Data) {
+        self.loader = loader
+        self.cache = Cache()
     }
 
     func regions() throws -> [Region] {
-        try decodedFeatures().map { feature in
+        try boundaryData().features.map { feature in
             let polygons = feature.geometry.regionPolygons
             let coordinates = polygons.flatMap { $0.exterior.coordinates }
             let regionId = feature.properties.canonicalRegionId
@@ -43,14 +52,26 @@ nonisolated struct BundledRegionDataProvider: RegionDataProvider {
 
     func geometry(for regionId: String) throws -> [RegionPolygon] {
         let normalizedId = regionId.uppercased()
-        guard let feature = try decodedFeatures().first(where: { $0.properties.canonicalRegionId == normalizedId }) else {
+        guard let feature = try boundaryData().features.first(where: { $0.properties.canonicalRegionId == normalizedId }) else {
             throw ProviderError.missingGeometry(regionId)
         }
         return feature.geometry.regionPolygons
     }
 
     func catalogFingerprint() throws -> String {
-        let data = try loader()
+        try boundaryData().fingerprint
+    }
+
+    private func boundaryData() throws -> BoundaryData {
+        try cache.loadBoundaryData(loader: loader) { data in
+            BoundaryData(
+                features: try JSONDecoder().decode(RegionFeatureCollection.self, from: data).features,
+                fingerprint: Self.fingerprint(for: data)
+            )
+        }
+    }
+
+    private static func fingerprint(for data: Data) -> String {
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in data {
             hash ^= UInt64(byte)
@@ -59,21 +80,42 @@ nonisolated struct BundledRegionDataProvider: RegionDataProvider {
         return String(format: "%016llx", hash)
     }
 
-    private func decodedFeatures() throws -> [RegionBoundaryFeature] {
-        try JSONDecoder().decode(RegionFeatureCollection.self, from: loader()).features
+    nonisolated private final class Cache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var boundaryData: BoundaryData?
+
+        func loadBoundaryData(
+            loader: @Sendable () throws -> Data,
+            decoder: (Data) throws -> BoundaryData
+        ) throws -> BoundaryData {
+            lock.lock()
+            defer { lock.unlock() }
+            if let boundaryData {
+                return boundaryData
+            }
+
+            let decodedData = try decoder(loader())
+            boundaryData = decodedData
+            return decodedData
+        }
     }
 }
 
-nonisolated private struct RegionFeatureCollection: Decodable {
+nonisolated private struct BoundaryData: Sendable {
+    let features: [RegionBoundaryFeature]
+    let fingerprint: String
+}
+
+nonisolated private struct RegionFeatureCollection: Decodable, Sendable {
     let features: [RegionBoundaryFeature]
 }
 
-nonisolated private struct RegionBoundaryFeature: Decodable {
+nonisolated private struct RegionBoundaryFeature: Decodable, Sendable {
     let properties: RegionBoundaryProperties
     let geometry: RegionBoundaryGeometry
 }
 
-nonisolated private struct RegionBoundaryProperties: Decodable {
+nonisolated private struct RegionBoundaryProperties: Decodable, Sendable {
     let id: String
     let regionId: String?
     let level: String?
@@ -142,7 +184,7 @@ nonisolated private struct RegionBoundaryProperties: Decodable {
     }
 }
 
-nonisolated private struct RegionBoundaryGeometry: Decodable {
+nonisolated private struct RegionBoundaryGeometry: Decodable, Sendable {
     let type: String
     let polygons: [[[[Double]]]]
 

@@ -193,11 +193,12 @@ actor RegionAchievementService {
 
     private static func adminCoverageKeys(for catalogCities: [RegionAchievementMapCity]) -> Set<String> {
         var keys = Set<String>()
-        for city in catalogCities where isJapanAdmin1RegionId(city.normalizedRegionId) {
+        for city in catalogCities where isAdmin1RegionId(city.normalizedRegionId) {
             var aliases = [
                 city.adminArea,
                 city.cityName
-            ]
+            ].compactMap { $0 }
+            aliases.append(contentsOf: city.matchKeys.flatMap(adminAliases))
             if city.normalizedRegionId == "JP-13" {
                 aliases.append(contentsOf: ["東京都", "東京", "东京", "东京都", "tokyo"])
             }
@@ -219,10 +220,18 @@ actor RegionAchievementService {
         return coverageKeys.contains("\(city.countryCodeKey)|\(normalizedKey(adminArea))")
     }
 
-    private static func isJapanAdmin1RegionId(_ regionId: String?) -> Bool {
+    private static func adminAliases(from matchKey: String) -> [String] {
+        let components = matchKey
+            .split(separator: "|", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard components.count >= 2 else { return [] }
+        return components.dropFirst().filter { !$0.isEmpty }
+    }
+
+    private static func isAdmin1RegionId(_ regionId: String?) -> Bool {
         guard let regionId else { return false }
-        guard regionId.count == 5, regionId.hasPrefix("JP-") else { return false }
-        return regionId.suffix(2).allSatisfy(\.isNumber)
+        let components = regionId.split(separator: "-", omittingEmptySubsequences: false)
+        return components.count == 2 && components[0].count == 2 && !components[1].isEmpty
     }
 
     private static func sortedMapCities(_ cities: [RegionAchievementMapCity]) -> [RegionAchievementMapCity] {

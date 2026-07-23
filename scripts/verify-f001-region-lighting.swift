@@ -149,9 +149,17 @@ func verifyBundledProvider() throws {
     let catalogURL = URL(fileURLWithPath: "footprint/Data/city_boundaries.geojson")
     let provider = BundledRegionDataProvider(url: catalogURL)
     let regions = try provider.regions()
-    try requireEqual(regions.count, 48, "Admin1 catalog should contain 47 Japan prefectures plus the SF demo region")
+    try require(regions.count >= 4_000, "Admin1 catalog should cover global first-level regions")
     try require(regions.allSatisfy { $0.datum == .wgs84 }, "Bundled catalog should use WGS-84 canonical datum")
     try require(regions.contains { $0.regionId == "US-CA-SF" }, "Catalog should expose San Francisco by canonical regionId")
+    let globalAdmin1 = regions.filter { $0.level == .admin1 }
+    let globalAdmin1Countries = Set(globalAdmin1.map { $0.countryCode.uppercased() })
+    try require(globalAdmin1.count >= 4_000, "Catalog should expose global admin1 boundaries")
+    try require(globalAdmin1Countries.count >= 180, "Catalog should include admin1 coverage for most countries")
+    for requiredRegionId in ["US-CA", "CA-ON", "AU-NSW", "BR-SP", "CN-GD", "IN-MH"] {
+        let region = try requireRegion(regions, id: requiredRegionId)
+        try requireEqual(region.level, .admin1, "\(requiredRegionId) should be modeled as admin1")
+    }
     let japanAdmin1 = regions
         .filter { $0.countryCode.uppercased() == "JP" && $0.level == .admin1 }
     try requireEqual(japanAdmin1.count, 47, "Japan catalog should expose all 47 prefectures")
@@ -195,7 +203,33 @@ func verifyBundledProvider() throws {
     try requireEqual(matcher.match(Coordinate(latitude: 43.0618, longitude: 141.3545))?.region.regionId, "JP-01", "Provider matcher should match Sapporo to Hokkaido")
     try requireEqual(matcher.match(Coordinate(latitude: 34.6873, longitude: 135.5262))?.region.regionId, "JP-27", "Provider matcher should match Osaka Castle to Osaka")
     try requireEqual(matcher.match(Coordinate(latitude: 26.2124, longitude: 127.6809))?.region.regionId, "JP-47", "Provider matcher should match Naha to Okinawa")
-    try require(matcher.match(Coordinate(latitude: 34.0522, longitude: -118.2437)) == nil, "Provider matcher should not match a far outside point")
+    try requireEqual(matcher.match(Coordinate(latitude: 34.0522, longitude: -118.2437))?.region.regionId, "US-CA", "Provider matcher should match Los Angeles to California")
+    try requireEqual(matcher.match(Coordinate(latitude: 43.6532, longitude: -79.3832))?.region.regionId, "CA-ON", "Provider matcher should match Toronto to Ontario")
+    try requireEqual(matcher.match(Coordinate(latitude: -33.8688, longitude: 151.2093))?.region.regionId, "AU-NSW", "Provider matcher should match Sydney to New South Wales")
+    try requireEqual(matcher.match(Coordinate(latitude: -23.5505, longitude: -46.6333))?.region.regionId, "BR-SP", "Provider matcher should match Sao Paulo to Sao Paulo state")
+    try requireEqual(matcher.match(Coordinate(latitude: 23.1291, longitude: 113.2644))?.region.regionId, "CN-GD", "Provider matcher should match Guangzhou to Guangdong")
+    try requireEqual(matcher.match(Coordinate(latitude: 19.0760, longitude: 72.8777))?.region.regionId, "IN-MH", "Provider matcher should match Mumbai to Maharashtra")
+    try require(matcher.match(Coordinate(latitude: 0, longitude: -30)) == nil, "Provider matcher should not match a far outside ocean point")
+}
+
+func verifyCityBoundaryCatalog() throws {
+    let catalogURL = URL(fileURLWithPath: "footprint/Data/city_boundaries.geojson")
+    let catalog = CityBoundaryCatalog(loader: { @Sendable in try Data(contentsOf: catalogURL) })
+    let cities = try catalog.loadCities()
+    let regionIds = Set(cities.compactMap(\.normalizedRegionId))
+
+    try require(cities.count >= 4_000, "Map overlay catalog should decode global admin1 boundaries")
+    for requiredRegionId in ["US-CA", "CA-ON", "AU-NSW", "BR-SP", "CN-GD", "IN-MH", "JP-13", "US-CA-SF"] {
+        try require(regionIds.contains(requiredRegionId), "Map overlay catalog should expose \(requiredRegionId)")
+    }
+    let california = try requireMapCity(cities, id: "US-CA")
+    try require(!california.boundaryPolygons.isEmpty, "California overlay should carry real boundary polygons")
+    try requireEqual(california.countryCodeKey, "US", "Map overlay country code should normalize")
+    try require(
+        california.cityKeyAliases.contains("us|california|california")
+            || california.cityKeyAliases.contains("us|加利福尼亚州|加利福尼亚州"),
+        "California overlay should include usable aliases"
+    )
 }
 
 func requireRegion(_ regions: [Region], id: String) throws -> Region {
@@ -203,6 +237,13 @@ func requireRegion(_ regions: [Region], id: String) throws -> Region {
         throw VerificationFailure(description: "Expected catalog to contain \(id)")
     }
     return region
+}
+
+func requireMapCity(_ cities: [RegionAchievementMapCity], id: String) throws -> RegionAchievementMapCity {
+    guard let city = cities.first(where: { $0.normalizedRegionId == id }) else {
+        throw VerificationFailure(description: "Expected map catalog to contain \(id)")
+    }
+    return city
 }
 
 func catalogAliases(in url: URL, regionId: String) throws -> [String] {
@@ -371,6 +412,7 @@ enum F001Verifier {
         try verifyMatcher()
         try verifyMapViewportFiltering()
         try verifyBundledProvider()
+        try verifyCityBoundaryCatalog()
         #if DEBUG
         try verifyDemoSeeds()
         #endif

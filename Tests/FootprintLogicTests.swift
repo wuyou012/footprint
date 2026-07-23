@@ -42,6 +42,7 @@ struct FootprintLogicTests {
         try testIntegratedDatabaseSchemaIncludesAmbientAndRegionTables()
         try testRegionAchievementSamplesIncludeAmbientPoints()
         try testCityBoundaryCatalogCachesDecodedCities()
+        try testBundledRegionDataProviderCachesDecodedBoundaries()
         try testDatabaseResumesOpenAmbientDaySession()
         try testMigrationDoesNotDowngradeUserVersion()
         print("FootprintLogicTests passed")
@@ -262,6 +263,23 @@ struct FootprintLogicTests {
         try expectEqual(firstLoad, secondLoad, "Cached city boundary load should return the same cities")
         try expectEqual(firstLoad.count, 1, "Minimal city boundary fixture should decode one city")
         try expectEqual(firstLoad[0].regionId, "JP-13", "City boundary region id should normalize to canonical format")
+    }
+
+    private static func testBundledRegionDataProviderCachesDecodedBoundaries() throws {
+        let loader = CountingDataLoader(data: Data(Self.minimalCityBoundaryGeoJSON.utf8))
+        let provider = BundledRegionDataProvider(loader: { @Sendable in try loader.load() })
+
+        let regions = try provider.regions()
+        let geometry = try provider.geometry(for: "JP-13")
+        let fingerprint = try provider.catalogFingerprint()
+        let cachedRegions = try provider.regions()
+
+        try expectEqual(loader.count, 1, "Bundled region provider should load static boundary data once")
+        try expectEqual(regions, cachedRegions, "Cached bundled regions should remain stable")
+        try expectEqual(regions.count, 1, "Minimal boundary fixture should decode one region")
+        try expectEqual(regions[0].regionId, "JP-13", "Bundled provider should normalize canonical region id")
+        try expectEqual(geometry.count, 1, "Bundled provider should return cached geometry")
+        try expect(!fingerprint.isEmpty, "Bundled provider should compute fingerprint from cached data")
     }
 
     private static func testDatabaseResumesOpenAmbientDaySession() throws {
