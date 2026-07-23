@@ -11,15 +11,19 @@ if (!inputPath || !outputPath) {
   process.exit(2);
 }
 
+const naturalEarthSourceVersion = "5.1.1";
+const naturalEarthSourceYear = 2022;
+const mapshaperPackage = "mapshaper@0.7.47";
 const simplifyPercent = process.env.GLOBAL_ADMIN1_SIMPLIFY ?? "2%";
 const minimumIslandArea = process.env.GLOBAL_ADMIN1_MIN_ISLAND_AREA;
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "footprint-global-admin1-"));
-const shapefilePath = prepareShapefile(inputPath, temporaryDirectory);
+const { shapefilePath, sourceVersion } = prepareShapefile(inputPath, temporaryDirectory);
+validateNaturalEarthVersion(sourceVersion);
 const dissolvedPath = path.join(temporaryDirectory, "natural-earth-admin1.geojson");
 
 const mapshaperArguments = [
   "-y",
-  "mapshaper",
+  mapshaperPackage,
   shapefilePath,
   "-filter",
   '!!iso_a2 && iso_a2 != "-99" && iso_a2 != "-1" && !!iso_3166_2 && !!name',
@@ -60,8 +64,11 @@ const existing = fs.existsSync(outputPath)
 
 const preservedFeatures = (existing.features ?? []).filter(shouldPreserveExistingFeature);
 const preservedRegionIds = new Set(preservedFeatures.map(canonicalRegionId));
-const globalAdmin1Features = (naturalEarth.features ?? [])
+const naturalEarthFeatures = (naturalEarth.features ?? [])
   .map(naturalEarthAdmin1Feature)
+  .flatMap((feature) => feature ? [feature] : [])
+  .map(stampGenerationMetadata);
+const globalAdmin1Features = applyChinaPolicyOverrides(naturalEarthFeatures)
   .filter((feature) => !preservedRegionIds.has(canonicalRegionId(feature)))
   .sort((lhs, rhs) => canonicalRegionId(lhs).localeCompare(canonicalRegionId(rhs)));
 
@@ -69,6 +76,7 @@ validateUniqueRegionIds([...preservedFeatures, ...globalAdmin1Features]);
 validateGlobalCoverage(globalAdmin1Features);
 validatePreservedJapanFeatures(preservedFeatures);
 validateRequiredRegionIds([...preservedFeatures, ...globalAdmin1Features]);
+validateChinaPolicyOverrides([...preservedFeatures, ...globalAdmin1Features]);
 
 const collection = {
   type: "FeatureCollection",
@@ -91,7 +99,10 @@ console.log(
 
 function prepareShapefile(sourcePath, workingDirectory) {
   if (sourcePath.toLowerCase().endsWith(".shp")) {
-    return sourcePath;
+    return {
+      shapefilePath: sourcePath,
+      sourceVersion: readAdjacentVersionFile(sourcePath)
+    };
   }
   if (!sourcePath.toLowerCase().endsWith(".zip")) {
     throw new Error(`Expected .zip or .shp input, got ${sourcePath}`);
@@ -110,7 +121,10 @@ function prepareShapefile(sourcePath, workingDirectory) {
   if (shapefiles.length !== 1) {
     throw new Error(`Expected one shapefile in ${sourcePath}, found ${shapefiles.length}`);
   }
-  return shapefiles[0];
+  return {
+    shapefilePath: shapefiles[0],
+    sourceVersion: readVersionFile(extractDirectory)
+  };
 }
 
 function findFiles(directory, predicate) {
@@ -124,6 +138,27 @@ function findFiles(directory, predicate) {
     }
   }
   return results;
+}
+
+function readAdjacentVersionFile(shapefilePath) {
+  const directory = path.dirname(shapefilePath);
+  return readVersionFile(directory);
+}
+
+function readVersionFile(directory) {
+  const versionFiles = findFiles(directory, (filePath) => filePath.endsWith(".VERSION.txt"));
+  if (versionFiles.length !== 1) {
+    throw new Error(`Expected one Natural Earth VERSION.txt file near input, found ${versionFiles.length}`);
+  }
+  return fs.readFileSync(versionFiles[0], "utf8").trim();
+}
+
+function validateNaturalEarthVersion(actualVersion) {
+  if (actualVersion !== naturalEarthSourceVersion) {
+    throw new Error(
+      `Expected Natural Earth Admin 1 version ${naturalEarthSourceVersion}, got ${actualVersion}`
+    );
+  }
 }
 
 function shouldPreserveExistingFeature(feature) {
@@ -166,14 +201,166 @@ function naturalEarthAdmin1Feature(feature) {
         postal: clean(properties.postal)
       }),
       source: "Natural Earth Admin 1 States/Provinces",
-      sourceVersion: "5.1.1",
-      sourceYear: 2022,
+      sourceVersion: naturalEarthSourceVersion,
+      sourceYear: naturalEarthSourceYear,
       license: "Public Domain",
       boundaryPolicy: "de facto",
       mapCluster: "global-admin1"
     },
     geometry: normalizeGeometry(feature.geometry)
   };
+}
+
+function stampGenerationMetadata(feature) {
+  return {
+    ...feature,
+    properties: {
+      ...feature.properties,
+      sourceSimplification: simplifyPercent,
+      sourceMapshaperPackage: mapshaperPackage
+    }
+  };
+}
+
+function applyChinaPolicyOverrides(features) {
+  const taiwanFeatures = [];
+  let southTibetFeature = null;
+  const output = [];
+
+  for (const feature of features) {
+    const regionId = canonicalRegionId(feature);
+    const countryCode = String(feature.properties?.countryCode ?? "").toUpperCase();
+    if (countryCode === "TW" || regionId.startsWith("TW-")) {
+      taiwanFeatures.push(feature);
+      continue;
+    }
+    if (regionId === "IN-AR") {
+      southTibetFeature = feature;
+      continue;
+    }
+    output.push(feature);
+  }
+
+  if (taiwanFeatures.length > 0) {
+    output.push(chinaTaiwanProvinceFeature(taiwanFeatures));
+  }
+
+  if (southTibetFeature) {
+    const tibetIndex = output.findIndex((feature) => canonicalRegionId(feature) === "CN-XZ");
+    if (tibetIndex < 0) {
+      throw new Error("Cannot apply South Tibet override: missing CN-XZ");
+    }
+    output[tibetIndex] = mergeSouthTibetIntoTibet(output[tibetIndex], southTibetFeature);
+  }
+
+  return output;
+}
+
+function chinaTaiwanProvinceFeature(features) {
+  const componentRegionIds = features.map(canonicalRegionId).sort();
+  const aliasSet = new Set([
+    ...aliasesForRegion("CN", {
+      regionId: "CN-TW",
+      nameZh: "台湾省",
+      nameEn: "Taiwan Province",
+      naturalEarthName: "Taiwan",
+      localName: "台湾",
+      postal: "TW"
+    }),
+    cityKey("CN", "台湾", "台湾"),
+    cityKey("CN", "臺灣", "臺灣"),
+    cityKey("CN", "Taiwan", "Taiwan"),
+    cityKey("CN", "Taiwan", "Taiwan Province")
+  ]);
+  for (const feature of features) {
+    const properties = feature.properties ?? {};
+    for (const value of [
+      properties.nameZh,
+      properties.nameEn,
+      properties.adminArea,
+      properties.cityName,
+      canonicalRegionId(feature)
+    ]) {
+      const cleaned = clean(value);
+      if (cleaned) {
+        aliasSet.add(cityKey("CN", cleaned, cleaned));
+        aliasSet.add(cityKey("CN", cleaned, "台湾省"));
+      }
+    }
+  }
+
+  return {
+    type: "Feature",
+    properties: {
+      id: "cn-tw",
+      region_id: "CN-TW",
+      level: "admin1",
+      parent_id: "CN",
+      countryCode: "cn",
+      countryName: "China",
+      adminArea: "台湾省",
+      cityName: "台湾省",
+      nameZh: "台湾省",
+      nameEn: "Taiwan Province",
+      cityKey: cityKey("CN", "台湾省", "台湾省"),
+      aliases: [...aliasSet].sort(),
+      source: "Natural Earth Admin 1 States/Provinces + Footprint China policy override",
+      sourceVersion: naturalEarthSourceVersion,
+      sourceYear: naturalEarthSourceYear,
+      license: "Public Domain",
+      boundaryPolicy: "china-policy-override",
+      mapCluster: "global-admin1",
+      sourceSimplification: simplifyPercent,
+      sourceMapshaperPackage: mapshaperPackage,
+      sourceComponentRegionIds: componentRegionIds
+    },
+    geometry: mergeGeometries(features.map((feature) => feature.geometry))
+  };
+}
+
+function mergeSouthTibetIntoTibet(tibetFeature, southTibetFeature) {
+  return {
+    ...tibetFeature,
+    properties: {
+      ...tibetFeature.properties,
+      source: "Natural Earth Admin 1 States/Provinces + Footprint China policy override",
+      boundaryPolicy: "china-policy-override",
+      sourceComponentRegionIds: [
+        canonicalRegionId(tibetFeature),
+        canonicalRegionId(southTibetFeature)
+      ],
+      aliases: [
+        ...new Set([
+          ...(tibetFeature.properties?.aliases ?? []),
+          cityKey("CN", "藏南", "西藏自治区"),
+          cityKey("CN", "South Tibet", "Tibet"),
+          cityKey("CN", "Arunachal Pradesh", "Tibet")
+        ])
+      ].sort()
+    },
+    geometry: mergeGeometries([tibetFeature.geometry, southTibetFeature.geometry])
+  };
+}
+
+function mergeGeometries(geometries) {
+  const polygons = geometries.flatMap(geometryToPolygons);
+  if (polygons.length === 0) {
+    throw new Error("Cannot merge empty geometry collection");
+  }
+  if (polygons.length === 1) {
+    return { type: "Polygon", coordinates: polygons[0] };
+  }
+  return { type: "MultiPolygon", coordinates: polygons };
+}
+
+function geometryToPolygons(geometry) {
+  if (geometry.type === "Polygon") {
+    return [geometry.coordinates];
+  }
+  if (geometry.type === "MultiPolygon") {
+    return geometry.coordinates;
+  }
+  throw new Error(`Unsupported merged geometry type: ${geometry.type}`);
 }
 
 function aliasesForRegion(countryCode, values) {
@@ -308,9 +495,35 @@ function validatePreservedJapanFeatures(features) {
 
 function validateRequiredRegionIds(features) {
   const regionIds = new Set(features.map(canonicalRegionId));
-  for (const regionId of ["US-CA", "CA-ON", "AU-NSW", "BR-SP", "CN-GD", "IN-MH", "JP-13", "US-CA-SF"]) {
+  for (const regionId of ["US-CA", "CA-ON", "AU-NSW", "BR-SP", "CN-GD", "CN-TW", "CN-XZ", "IN-MH", "JP-13", "US-CA-SF"]) {
     if (!regionIds.has(regionId)) {
       throw new Error(`Missing required region ${regionId}`);
     }
+  }
+}
+
+function validateChinaPolicyOverrides(features) {
+  const regionIds = new Set(features.map(canonicalRegionId));
+  if (!regionIds.has("CN-TW")) {
+    throw new Error("Missing China-policy Taiwan region CN-TW");
+  }
+  if (regionIds.has("IN-AR")) {
+    throw new Error("South Tibet must not be exposed as IN-AR");
+  }
+  for (const feature of features) {
+    const regionId = canonicalRegionId(feature);
+    const countryCode = String(feature.properties?.countryCode ?? "").toUpperCase();
+    if (countryCode === "TW" || regionId.startsWith("TW-")) {
+      throw new Error(`Taiwan must be grouped under CN-TW, found ${regionId}`);
+    }
+  }
+  const taiwan = features.find((feature) => canonicalRegionId(feature) === "CN-TW");
+  if (String(taiwan?.properties?.countryCode ?? "").toUpperCase() !== "CN") {
+    throw new Error("CN-TW must use countryCode CN");
+  }
+  const tibet = features.find((feature) => canonicalRegionId(feature) === "CN-XZ");
+  const tibetComponents = tibet?.properties?.sourceComponentRegionIds ?? [];
+  if (!Array.isArray(tibetComponents) || !tibetComponents.includes("IN-AR")) {
+    throw new Error("CN-XZ must include IN-AR geometry in sourceComponentRegionIds");
   }
 }

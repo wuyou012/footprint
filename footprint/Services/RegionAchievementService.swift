@@ -5,6 +5,7 @@ actor RegionAchievementService {
     private let store = TrackDatabase.shared
     private let geocoder = CLGeocoder()
     private let cityBoundaryCatalog = CityBoundaryCatalog()
+    private var cachedRegionMatcher: CachedRegionMatcher?
 
     func loadCountries() throws -> [RegionAchievementCountry] {
         try store.loadRegionAchievements()
@@ -116,33 +117,46 @@ actor RegionAchievementService {
         let samples = try store.loadRegionAchievementTrackSamples()
         guard !samples.isEmpty else { return [:] }
 
-        let provider = BundledRegionDataProvider()
-        let regions = try provider.regions()
-        var geometryByRegionId: [String: [RegionPolygon]] = [:]
-        for region in regions {
-            geometryByRegionId[region.regionId] = try provider.geometry(for: region.regionId)
-        }
-        try store.replaceRegionCatalogIfNeeded(
-            catalogKey: "city_boundaries",
-            fingerprint: try provider.catalogFingerprint(),
-            regions: regions,
-            geometryByRegionId: geometryByRegionId
-        )
-
-        let catalog = try store.loadRegionCatalog()
-        let matcher = try RegionMatcher(
-            regions: catalog.regions,
-            geometryByRegionId: catalog.geometryByRegionId
-        )
+        let matcher = try loadCatalogBackedMatcher()
         var pointCountsByRegionId: [String: Int] = [:]
 
         for sample in samples {
             guard Self.shouldUse(sample) else { continue }
-            guard let match = matcher.match(sample.coordinate) else { continue }
+            let candidateRegionIds = try store.loadRegionSpatialCandidateIds(for: sample.coordinate)
+            guard !candidateRegionIds.isEmpty else { continue }
+            guard let match = matcher.match(
+                sample.coordinate,
+                candidateRegionIds: candidateRegionIds
+            ) else { continue }
             pointCountsByRegionId[match.region.regionId, default: 0] += max(1, sample.pointCount)
         }
 
         return pointCountsByRegionId
+    }
+
+    private func loadCatalogBackedMatcher() throws -> RegionMatcher {
+        let provider = BundledRegionDataProvider()
+        let catalog = try provider.catalog()
+        try store.replaceRegionCatalogIfNeeded(
+            catalogKey: "city_boundaries",
+            fingerprint: catalog.fingerprint,
+            regions: catalog.regions,
+            geometryByRegionId: catalog.geometryByRegionId
+        )
+        if let cachedRegionMatcher,
+           cachedRegionMatcher.fingerprint == catalog.fingerprint {
+            return cachedRegionMatcher.matcher
+        }
+
+        let matcher = try RegionMatcher(
+            regions: catalog.regions,
+            geometryByRegionId: catalog.geometryByRegionId
+        )
+        cachedRegionMatcher = CachedRegionMatcher(
+            fingerprint: catalog.fingerprint,
+            matcher: matcher
+        )
+        return matcher
     }
 
     private static func shouldUse(_ sample: RegionAchievementTrackCoordinate) -> Bool {
@@ -247,5 +261,10 @@ actor RegionAchievementService {
             }
             return lhs.cityName < rhs.cityName
         }
+    }
+
+    private struct CachedRegionMatcher {
+        let fingerprint: String
+        let matcher: RegionMatcher
     }
 }

@@ -43,6 +43,9 @@ struct FootprintLogicTests {
         try testRegionAchievementSamplesIncludeAmbientPoints()
         try testCityBoundaryCatalogCachesDecodedCities()
         try testBundledRegionDataProviderCachesDecodedBoundaries()
+        try testBundledRegionDataProviderExposesCachedCatalogSnapshot()
+        try testDatabaseRegionSpatialCandidatesUseRTree()
+        try testAwardOverlayReloadPolicyBatchesRecordingPointUpdates()
         try testDatabaseResumesOpenAmbientDaySession()
         try testMigrationDoesNotDowngradeUserVersion()
         print("FootprintLogicTests passed")
@@ -282,6 +285,89 @@ struct FootprintLogicTests {
         try expect(!fingerprint.isEmpty, "Bundled provider should compute fingerprint from cached data")
     }
 
+    private static func testBundledRegionDataProviderExposesCachedCatalogSnapshot() throws {
+        let loader = CountingDataLoader(data: Data(Self.minimalCityBoundaryGeoJSON.utf8))
+        let provider = BundledRegionDataProvider(loader: { @Sendable in try loader.load() })
+
+        let catalog = try provider.catalog()
+        let cachedCatalog = try provider.catalog()
+
+        try expectEqual(loader.count, 1, "Catalog snapshot should decode static boundary data once")
+        try expectEqual(catalog.regions, cachedCatalog.regions, "Catalog snapshot should be cached")
+        try expectEqual(catalog.regions.map(\.regionId), ["JP-13"], "Catalog snapshot should expose regions")
+        try expectEqual(catalog.geometryByRegionId["JP-13"]?.count, 1, "Catalog snapshot should expose geometry without per-region lookup")
+        try expect(!catalog.fingerprint.isEmpty, "Catalog snapshot should include fingerprint")
+    }
+
+    private static func testDatabaseRegionSpatialCandidatesUseRTree() throws {
+        let url = temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let database = try TrackDatabase(databaseURL: url)
+        let west = rectangle(minLat: 0, maxLat: 1, minLng: 0, maxLng: 1)
+        let east = rectangle(minLat: 0, maxLat: 1, minLng: 10, maxLng: 11)
+        let regions = [
+            region("TEST-WEST", polygon: west),
+            region("TEST-EAST", polygon: east)
+        ]
+
+        try database.replaceRegionCatalog(
+            regions: regions,
+            geometryByRegionId: [
+                "TEST-WEST": [west],
+                "TEST-EAST": [east]
+            ],
+            catalogKey: "test",
+            fingerprint: "rtree"
+        )
+
+        let westCandidates = try database.loadRegionSpatialCandidateIds(
+            for: Coordinate(latitude: 0.5, longitude: 0.5),
+            padding: 0
+        )
+        let outsideCandidates = try database.loadRegionSpatialCandidateIds(
+            for: Coordinate(latitude: 5, longitude: 5),
+            padding: 0
+        )
+
+        try expectEqual(westCandidates, Set(["TEST-WEST"]), "R-tree should prefilter to the containing region bbox")
+        try expect(outsideCandidates.isEmpty, "R-tree should return no candidates for outside points")
+    }
+
+    private static func testAwardOverlayReloadPolicyBatchesRecordingPointUpdates() throws {
+        try expect(
+            !AwardOverlayReloadPolicy.shouldReloadAfterAcceptedPointChange(
+                isRecording: true,
+                lastReloadAcceptedCount: 0,
+                currentAcceptedCount: 1
+            ),
+            "Recording should not reload award overlay for every accepted point"
+        )
+        try expect(
+            AwardOverlayReloadPolicy.shouldReloadAfterAcceptedPointChange(
+                isRecording: true,
+                lastReloadAcceptedCount: 0,
+                currentAcceptedCount: 10
+            ),
+            "Recording should reload after a bounded point batch"
+        )
+        try expect(
+            AwardOverlayReloadPolicy.shouldReloadAfterAcceptedPointChange(
+                isRecording: false,
+                lastReloadAcceptedCount: 10,
+                currentAcceptedCount: 11
+            ),
+            "Manual non-recording updates should refresh immediately"
+        )
+        try expect(
+            AwardOverlayReloadPolicy.shouldReloadAfterAcceptedPointChange(
+                isRecording: true,
+                lastReloadAcceptedCount: 20,
+                currentAcceptedCount: 1
+            ),
+            "A new recording session should refresh when the accepted count resets"
+        )
+    }
+
     private static func testDatabaseResumesOpenAmbientDaySession() throws {
         let url = temporaryDatabaseURL()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -414,6 +500,33 @@ struct FootprintLogicTests {
 
         guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private static func rectangle(minLat: Double, maxLat: Double, minLng: Double, maxLng: Double) -> RegionPolygon {
+        RegionPolygon(
+            exterior: RegionRing(
+                coordinates: [
+                    Coordinate(latitude: minLat, longitude: minLng),
+                    Coordinate(latitude: minLat, longitude: maxLng),
+                    Coordinate(latitude: maxLat, longitude: maxLng),
+                    Coordinate(latitude: maxLat, longitude: minLng),
+                    Coordinate(latitude: minLat, longitude: minLng)
+                ]
+            )
+        )
+    }
+
+    private static func region(_ id: String, polygon: RegionPolygon) -> Region {
+        Region(
+            regionId: id,
+            level: .admin1,
+            datum: .wgs84,
+            bbox: polygon.bbox,
+            parentId: nil,
+            nameZh: id,
+            nameEn: id,
+            countryCode: String(id.prefix(2))
+        )
     }
 
     private static let minimalCityBoundaryGeoJSON = """

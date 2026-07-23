@@ -25,6 +25,7 @@ struct RecordView: View {
     @State private var showingSettings = false
     @State private var recordingPulse = false
     @State private var awardMapCities: [RegionAchievementMapCity] = []
+    @State private var lastAwardOverlayReloadAcceptedCount = 0
 
     private let achievementService = RegionAchievementService()
 
@@ -104,6 +105,11 @@ struct RecordView: View {
             await loadAwardOverlay()
         }
         .onChange(of: recorder.stats.acceptedCount) { _, _ in
+            guard AwardOverlayReloadPolicy.shouldReloadAfterAcceptedPointChange(
+                isRecording: recorder.recording || recorder.persistentRecordingEnabled,
+                lastReloadAcceptedCount: lastAwardOverlayReloadAcceptedCount,
+                currentAcceptedCount: recorder.stats.acceptedCount
+            ) else { return }
             Task { await loadAwardOverlay() }
         }
         .onChange(of: showAwardOverlay) { _, enabled in
@@ -387,6 +393,8 @@ struct RecordView: View {
 
     @MainActor
     private func loadAwardOverlay() async {
+        lastAwardOverlayReloadAcceptedCount = recorder.stats.acceptedCount
+
         guard showAwardOverlay else {
             awardMapCities = []
             FootprintLog.diag("award overlay skipped: disabled")

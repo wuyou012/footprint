@@ -17,6 +17,7 @@ swiftc \
   "$ROOT/footprint/Services/MotionGate.swift" \
   "$ROOT/footprint/Services/PersistentLocationCoordinator.swift" \
   "$ROOT/footprint/Services/SessionSegmenter.swift" \
+  "$ROOT/footprint/Services/AwardOverlayReloadPolicy.swift" \
   "$ROOT/footprint/Services/TrackDatabase.swift" \
   "$ROOT/footprint/Services/CityBoundaryCatalog.swift" \
   "$ROOT/footprint/Services/BundledRegionDataProvider.swift" \

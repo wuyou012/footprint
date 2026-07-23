@@ -160,6 +160,15 @@ func verifyBundledProvider() throws {
         let region = try requireRegion(regions, id: requiredRegionId)
         try requireEqual(region.level, .admin1, "\(requiredRegionId) should be modeled as admin1")
     }
+    let taiwan = try requireRegion(regions, id: "CN-TW")
+    try requireEqual(taiwan.level, .admin1, "Taiwan should be modeled as China admin1")
+    try requireEqual(taiwan.countryCode, "CN", "Taiwan should be grouped under China country code")
+    try requireEqual(taiwan.parentId, "CN", "Taiwan should use China as parent")
+    try requireEqual(taiwan.nameZh, "台湾省", "Taiwan China-policy boundary should use Taiwan Province name")
+    try require(!regions.contains { $0.countryCode.uppercased() == "TW" }, "Taiwan should not appear as a separate country")
+    try require(!regions.contains { $0.regionId.hasPrefix("TW-") }, "Taiwan county/city regions should be collapsed into CN-TW")
+    try require(!regions.contains { $0.regionId == "IN-AR" }, "South Tibet should not be exposed as India's IN-AR award region")
+
     let japanAdmin1 = regions
         .filter { $0.countryCode.uppercased() == "JP" && $0.level == .admin1 }
     try requireEqual(japanAdmin1.count, 47, "Japan catalog should expose all 47 prefectures")
@@ -182,6 +191,17 @@ func verifyBundledProvider() throws {
     try require(
         tokyoAliases.contains("jp|东京|東京都"),
         "Tokyo catalog should alias Simplified Chinese CLGeocoder output"
+    )
+    let californiaProperties = try catalogProperties(in: catalogURL, regionId: "US-CA")
+    try requireEqual(
+        californiaProperties["sourceSimplification"] as? String,
+        "2%",
+        "Natural Earth generated features should record simplification"
+    )
+    try requireEqual(
+        californiaProperties["sourceMapshaperPackage"] as? String,
+        "mapshaper@0.7.47",
+        "Natural Earth generated features should record pinned mapshaper package"
     )
 
     let sanFranciscoGeometry = try provider.geometry(for: "US-CA-SF")
@@ -208,6 +228,8 @@ func verifyBundledProvider() throws {
     try requireEqual(matcher.match(Coordinate(latitude: -33.8688, longitude: 151.2093))?.region.regionId, "AU-NSW", "Provider matcher should match Sydney to New South Wales")
     try requireEqual(matcher.match(Coordinate(latitude: -23.5505, longitude: -46.6333))?.region.regionId, "BR-SP", "Provider matcher should match Sao Paulo to Sao Paulo state")
     try requireEqual(matcher.match(Coordinate(latitude: 23.1291, longitude: 113.2644))?.region.regionId, "CN-GD", "Provider matcher should match Guangzhou to Guangdong")
+    try requireEqual(matcher.match(Coordinate(latitude: 25.0330, longitude: 121.5654))?.region.regionId, "CN-TW", "Provider matcher should match Taipei to Taiwan Province under China")
+    try requireEqual(matcher.match(Coordinate(latitude: 27.0844, longitude: 93.6053))?.region.regionId, "CN-XZ", "Provider matcher should match South Tibet to Tibet")
     try requireEqual(matcher.match(Coordinate(latitude: 19.0760, longitude: 72.8777))?.region.regionId, "IN-MH", "Provider matcher should match Mumbai to Maharashtra")
     try require(matcher.match(Coordinate(latitude: 0, longitude: -30)) == nil, "Provider matcher should not match a far outside ocean point")
 }
@@ -219,9 +241,11 @@ func verifyCityBoundaryCatalog() throws {
     let regionIds = Set(cities.compactMap(\.normalizedRegionId))
 
     try require(cities.count >= 4_000, "Map overlay catalog should decode global admin1 boundaries")
-    for requiredRegionId in ["US-CA", "CA-ON", "AU-NSW", "BR-SP", "CN-GD", "IN-MH", "JP-13", "US-CA-SF"] {
+    for requiredRegionId in ["US-CA", "CA-ON", "AU-NSW", "BR-SP", "CN-GD", "CN-TW", "IN-MH", "JP-13", "US-CA-SF"] {
         try require(regionIds.contains(requiredRegionId), "Map overlay catalog should expose \(requiredRegionId)")
     }
+    try require(!regionIds.contains("IN-AR"), "Map overlay catalog should not expose South Tibet as IN-AR")
+    try require(!regionIds.contains("TW-TPE"), "Map overlay catalog should not expose Taiwan as TW-TPE")
     let california = try requireMapCity(cities, id: "US-CA")
     try require(!california.boundaryPolygons.isEmpty, "California overlay should carry real boundary polygons")
     try requireEqual(california.countryCodeKey, "US", "Map overlay country code should normalize")
@@ -229,6 +253,13 @@ func verifyCityBoundaryCatalog() throws {
         california.cityKeyAliases.contains("us|california|california")
             || california.cityKeyAliases.contains("us|加利福尼亚州|加利福尼亚州"),
         "California overlay should include usable aliases"
+    )
+    let taiwan = try requireMapCity(cities, id: "CN-TW")
+    try requireEqual(taiwan.countryCodeKey, "CN", "Taiwan overlay country code should be China")
+    try require(
+        taiwan.cityKeyAliases.contains("cn|台湾省|台湾省")
+            || taiwan.cityKeyAliases.contains("cn|taiwan province|taiwan province"),
+        "Taiwan overlay should include China-policy aliases"
     )
 }
 
@@ -247,18 +278,22 @@ func requireMapCity(_ cities: [RegionAchievementMapCity], id: String) throws -> 
 }
 
 func catalogAliases(in url: URL, regionId: String) throws -> [String] {
+    try catalogProperties(in: url, regionId: regionId)["aliases"] as? [String] ?? []
+}
+
+func catalogProperties(in url: URL, regionId: String) throws -> [String: Any] {
     let data = try Data(contentsOf: url)
     guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
           let features = root["features"] as? [[String: Any]]
-    else { return [] }
+    else { return [:] }
 
     for feature in features {
         guard let properties = feature["properties"] as? [String: Any],
               properties["region_id"] as? String == regionId
         else { continue }
-        return properties["aliases"] as? [String] ?? []
+        return properties
     }
-    return []
+    return [:]
 }
 
 func mapCity(

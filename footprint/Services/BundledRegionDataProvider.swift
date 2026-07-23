@@ -1,5 +1,11 @@
 import Foundation
 
+nonisolated struct RegionCatalogSnapshot: Sendable {
+    let regions: [Region]
+    let geometryByRegionId: [String: [RegionPolygon]]
+    let fingerprint: String
+}
+
 nonisolated struct BundledRegionDataProvider: RegionDataProvider {
     enum ProviderError: Error {
         case missingResource
@@ -33,11 +39,49 @@ nonisolated struct BundledRegionDataProvider: RegionDataProvider {
     }
 
     func regions() throws -> [Region] {
-        try boundaryData().features.map { feature in
+        try catalog().regions
+    }
+
+    func geometry(for regionId: String) throws -> [RegionPolygon] {
+        let normalizedId = regionId.uppercased()
+        guard let polygons = try catalog().geometryByRegionId[normalizedId] else {
+            throw ProviderError.missingGeometry(regionId)
+        }
+        return polygons
+    }
+
+    func catalogFingerprint() throws -> String {
+        try catalog().fingerprint
+    }
+
+    func catalog() throws -> RegionCatalogSnapshot {
+        try boundaryData().catalog
+    }
+
+    private func boundaryData() throws -> BoundaryData {
+        try cache.loadBoundaryData(loader: loader) { data in
+            let features = try JSONDecoder().decode(RegionFeatureCollection.self, from: data).features
+            return BoundaryData(
+                catalog: Self.makeCatalogSnapshot(
+                    features: features,
+                    fingerprint: Self.fingerprint(for: data)
+                )
+            )
+        }
+    }
+
+    private static func makeCatalogSnapshot(
+        features: [RegionBoundaryFeature],
+        fingerprint: String
+    ) -> RegionCatalogSnapshot {
+        var regions: [Region] = []
+        var geometryByRegionId: [String: [RegionPolygon]] = [:]
+
+        for feature in features {
             let polygons = feature.geometry.regionPolygons
             let coordinates = polygons.flatMap { $0.exterior.coordinates }
             let regionId = feature.properties.canonicalRegionId
-            return Region(
+            regions.append(Region(
                 regionId: regionId,
                 level: feature.properties.regionLevel,
                 datum: .wgs84,
@@ -46,29 +90,15 @@ nonisolated struct BundledRegionDataProvider: RegionDataProvider {
                 nameZh: feature.properties.resolvedNameZh,
                 nameEn: feature.properties.resolvedNameEn,
                 countryCode: feature.properties.countryCode.uppercased()
-            )
+            ))
+            geometryByRegionId[regionId] = polygons
         }
-    }
 
-    func geometry(for regionId: String) throws -> [RegionPolygon] {
-        let normalizedId = regionId.uppercased()
-        guard let feature = try boundaryData().features.first(where: { $0.properties.canonicalRegionId == normalizedId }) else {
-            throw ProviderError.missingGeometry(regionId)
-        }
-        return feature.geometry.regionPolygons
-    }
-
-    func catalogFingerprint() throws -> String {
-        try boundaryData().fingerprint
-    }
-
-    private func boundaryData() throws -> BoundaryData {
-        try cache.loadBoundaryData(loader: loader) { data in
-            BoundaryData(
-                features: try JSONDecoder().decode(RegionFeatureCollection.self, from: data).features,
-                fingerprint: Self.fingerprint(for: data)
-            )
-        }
+        return RegionCatalogSnapshot(
+            regions: regions,
+            geometryByRegionId: geometryByRegionId,
+            fingerprint: fingerprint
+        )
     }
 
     private static func fingerprint(for data: Data) -> String {
@@ -102,8 +132,7 @@ nonisolated struct BundledRegionDataProvider: RegionDataProvider {
 }
 
 nonisolated private struct BoundaryData: Sendable {
-    let features: [RegionBoundaryFeature]
-    let fingerprint: String
+    let catalog: RegionCatalogSnapshot
 }
 
 nonisolated private struct RegionFeatureCollection: Decodable, Sendable {
