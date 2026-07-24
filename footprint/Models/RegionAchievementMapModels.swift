@@ -6,6 +6,9 @@ nonisolated struct RegionAchievementMapViewport: Hashable, Sendable {
     let minLongitude: Double
     let maxLongitude: Double
 
+    var latitudeDelta: Double { maxLatitude - minLatitude }
+    var longitudeDelta: Double { maxLongitude - minLongitude }
+
     init(
         centerLatitude: Double,
         centerLongitude: Double,
@@ -31,6 +34,70 @@ nonisolated struct RegionAchievementMapViewport: Hashable, Sendable {
             && otherMinLatitude <= maxLatitude + padding
             && otherMaxLongitude >= minLongitude - padding
             && otherMinLongitude <= maxLongitude + padding
+    }
+}
+
+nonisolated enum RegionAchievementMapOverlayLimiter {
+    static let defaultMaxRenderedRegions = 420
+
+    private static let broadLatitudeDelta = 45.0
+    private static let broadLongitudeDelta = 90.0
+    private static let viewportPaddingMultiplier = 0.08
+    private static let minimumViewportPadding = 0.05
+    private static let maximumViewportPadding = 8.0
+
+    static func visibleCities(
+        in cities: [RegionAchievementMapCity],
+        countryCode: String?,
+        viewport: RegionAchievementMapViewport?,
+        maxRenderedRegions: Int = defaultMaxRenderedRegions
+    ) -> [RegionAchievementMapCity] {
+        let scopedCities = RegionAchievementMapFilter.countryCities(in: cities, countryCode: countryCode)
+        let safeLimit = max(0, maxRenderedRegions)
+        guard safeLimit > 0 else { return [] }
+        guard let viewport else {
+            return cappedPrioritized(RegionAchievementMapFilter.overviewCities(in: scopedCities), max: safeLimit)
+        }
+
+        let intersectingCities = scopedCities.filter { city in
+            city.intersects(viewport, padding: padding(for: viewport))
+        }
+        let eligibleCities = isBroad(viewport)
+            ? intersectingCities.filter(\.isUnlocked)
+            : intersectingCities
+        return cappedPrioritized(eligibleCities, max: safeLimit)
+    }
+
+    private static func isBroad(_ viewport: RegionAchievementMapViewport) -> Bool {
+        viewport.latitudeDelta > broadLatitudeDelta
+            || viewport.longitudeDelta > broadLongitudeDelta
+    }
+
+    private static func padding(for viewport: RegionAchievementMapViewport) -> Double {
+        min(
+            maximumViewportPadding,
+            max(minimumViewportPadding, max(viewport.latitudeDelta, viewport.longitudeDelta) * viewportPaddingMultiplier)
+        )
+    }
+
+    private static func cappedPrioritized(
+        _ cities: [RegionAchievementMapCity],
+        max limit: Int
+    ) -> [RegionAchievementMapCity] {
+        Array(cities.sorted(by: overlayPriority).prefix(limit))
+    }
+
+    private static func overlayPriority(
+        lhs: RegionAchievementMapCity,
+        rhs: RegionAchievementMapCity
+    ) -> Bool {
+        if lhs.isUnlocked != rhs.isUnlocked {
+            return lhs.isUnlocked && !rhs.isUnlocked
+        }
+        if lhs.countryCodeKey != rhs.countryCodeKey {
+            return lhs.countryCodeKey < rhs.countryCodeKey
+        }
+        return lhs.cityKey < rhs.cityKey
     }
 }
 

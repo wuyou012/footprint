@@ -314,7 +314,7 @@ function chinaTaiwanProvinceFeature(features) {
       sourceMapshaperPackage: mapshaperPackage,
       sourceComponentRegionIds: componentRegionIds
     },
-    geometry: mergeGeometries(features.map((feature) => feature.geometry))
+    geometry: dissolveFeatureGeometries(features, "CN-TW")
   };
 }
 
@@ -351,6 +351,61 @@ function mergeGeometries(geometries) {
     return { type: "Polygon", coordinates: polygons[0] };
   }
   return { type: "MultiPolygon", coordinates: polygons };
+}
+
+function dissolveFeatureGeometries(features, dissolveId) {
+  const inputFeatures = features.flatMap((feature, featureIndex) => (
+    geometryToPolygons(feature.geometry).map((coordinates, polygonIndex) => ({
+      type: "Feature",
+      properties: {
+        dissolve_id: dissolveId,
+        source_region_id: canonicalRegionId(feature),
+        source_polygon_index: `${featureIndex}-${polygonIndex}`
+      },
+      geometry: {
+        type: "Polygon",
+        coordinates
+      }
+    }))
+  ));
+  if (inputFeatures.length === 0) {
+    throw new Error(`Cannot dissolve empty geometry collection for ${dissolveId}`);
+  }
+
+  const safeName = dissolveId.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+  const inputPath = path.join(temporaryDirectory, `${safeName}-dissolve-input.geojson`);
+  const outputPath = path.join(temporaryDirectory, `${safeName}-dissolve-output.geojson`);
+  fs.writeFileSync(inputPath, JSON.stringify({
+    type: "FeatureCollection",
+    features: inputFeatures
+  }));
+
+  const dissolve = spawnSync(
+    "npx",
+    [
+      "-y",
+      mapshaperPackage,
+      inputPath,
+      "-dissolve",
+      "dissolve_id",
+      "-o",
+      "format=geojson",
+      outputPath
+    ],
+    { encoding: "utf8" }
+  );
+  if (dissolve.status !== 0) {
+    process.stderr.write(dissolve.stdout);
+    process.stderr.write(dissolve.stderr);
+    process.exit(dissolve.status ?? 1);
+  }
+
+  const dissolved = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+  const dissolvedFeatures = dissolved.features ?? [];
+  if (dissolvedFeatures.length !== 1) {
+    throw new Error(`Expected one dissolved feature for ${dissolveId}, got ${dissolvedFeatures.length}`);
+  }
+  return normalizeGeometry(dissolvedFeatures[0].geometry);
 }
 
 function geometryToPolygons(geometry) {
@@ -520,6 +575,10 @@ function validateChinaPolicyOverrides(features) {
   const taiwan = features.find((feature) => canonicalRegionId(feature) === "CN-TW");
   if (String(taiwan?.properties?.countryCode ?? "").toUpperCase() !== "CN") {
     throw new Error("CN-TW must use countryCode CN");
+  }
+  const taiwanPolygonCount = geometryToPolygons(taiwan.geometry).length;
+  if (taiwanPolygonCount >= 10) {
+    throw new Error(`CN-TW geometry must be dissolved for map overlay, got ${taiwanPolygonCount} polygons`);
   }
   const tibet = features.find((feature) => canonicalRegionId(feature) === "CN-XZ");
   const tibetComponents = tibet?.properties?.sourceComponentRegionIds ?? [];

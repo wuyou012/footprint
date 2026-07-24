@@ -192,6 +192,7 @@ struct TrackMapView: View {
     private let awardOverlayToken: RegionAwardOverlayToken
 
     @State private var position: MapCameraPosition = .region(Self.fallbackRegion)
+    @State private var visibleAwardViewport: RegionAchievementMapViewport?
 
     // Keep real tracks primary; use award overview only for empty or continent-scale tracks.
     private static let trackRegionMinimumSpan = 0.01
@@ -237,7 +238,8 @@ struct TrackMapView: View {
         )
         self.firstPoint = points.first
         self.lastPoint = points.last
-        self.trackRegion = Self.makeDisplayRegion(points: points, awardCities: regionAwardCities)
+        let displayRegion = Self.makeDisplayRegion(points: points, awardCities: regionAwardCities)
+        self.trackRegion = displayRegion
         self.latestToken = TrackChangeToken(
             count: points.count,
             lastTimestampMs: points.last?.timestampMs,
@@ -245,6 +247,7 @@ struct TrackMapView: View {
             lastLongitude: points.last?.longitude
         )
         self.awardOverlayToken = RegionAwardOverlayToken(cities: regionAwardCities)
+        self._visibleAwardViewport = State(initialValue: Self.viewport(for: displayRegion ?? Self.fallbackRegion))
     }
 
     var body: some View {
@@ -264,7 +267,7 @@ struct TrackMapView: View {
 
     private var mapContent: some View {
         Map(position: $position) {
-            ForEach(regionAwardCities) { city in
+            ForEach(visibleRegionAwardCities) { city in
                 ForEach(city.mapBoundaryPolygons) { boundary in
                     MapPolygon(coordinates: boundary.mapCoordinates)
                         .foregroundStyle(regionFillColor(for: city).opacity(regionFillOpacity(for: city)))
@@ -305,6 +308,17 @@ struct TrackMapView: View {
         .overlay {
             mapTintOverlay
         }
+        .onMapCameraChange(frequency: .onEnd) { context in
+            visibleAwardViewport = Self.viewport(for: context.region)
+        }
+    }
+
+    private var visibleRegionAwardCities: [RegionAchievementMapCity] {
+        RegionAchievementMapOverlayLimiter.visibleCities(
+            in: regionAwardCities,
+            countryCode: nil,
+            viewport: visibleAwardViewport
+        )
     }
 
     @ViewBuilder
@@ -476,7 +490,7 @@ struct TrackMapView: View {
     private func updateCamera(animated: Bool = false) {
         let action = {
             if followLatest, let last = lastPoint {
-                position = cameraPosition(for: Self.liveRegion(centeredAt: last.coordinate))
+                setCamera(to: Self.liveRegion(centeredAt: last.coordinate))
             } else {
                 fitToTrack()
             }
@@ -490,11 +504,12 @@ struct TrackMapView: View {
     }
 
     private func fitToTrack() {
-        guard let trackRegion else {
-            position = cameraPosition(for: Self.fallbackRegion)
-            return
-        }
-        position = cameraPosition(for: trackRegion)
+        setCamera(to: trackRegion ?? Self.fallbackRegion)
+    }
+
+    private func setCamera(to region: MKCoordinateRegion) {
+        visibleAwardViewport = Self.viewport(for: region)
+        position = cameraPosition(for: region)
     }
 
     private func cameraPosition(for region: MKCoordinateRegion) -> MapCameraPosition {
@@ -520,6 +535,15 @@ struct TrackMapView: View {
         MKCoordinateRegion(
             center: coordinate,
             span: MKCoordinateSpan(latitudeDelta: liveRegionSpan, longitudeDelta: liveRegionSpan)
+        )
+    }
+
+    private static func viewport(for region: MKCoordinateRegion) -> RegionAchievementMapViewport {
+        RegionAchievementMapViewport(
+            centerLatitude: region.center.latitude,
+            centerLongitude: region.center.longitude,
+            latitudeDelta: region.span.latitudeDelta,
+            longitudeDelta: region.span.longitudeDelta
         )
     }
 

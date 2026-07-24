@@ -42,6 +42,9 @@ struct FootprintLogicTests {
         try testIntegratedDatabaseSchemaIncludesAmbientAndRegionTables()
         try testRegionAchievementSamplesIncludeAmbientPoints()
         try testCityBoundaryCatalogCachesDecodedCities()
+        try testTaiwanBoundaryIsDissolvedForMapOverlay()
+        try testAwardOverlayLimiterClipsToViewport()
+        try testAwardOverlayLimiterDropsLockedRegionsAtBroadZoom()
         try testBundledRegionDataProviderCachesDecodedBoundaries()
         try testBundledRegionDataProviderExposesCachedCatalogSnapshot()
         try testDatabaseRegionSpatialCandidatesUseRTree()
@@ -268,6 +271,65 @@ struct FootprintLogicTests {
         try expectEqual(firstLoad[0].regionId, "JP-13", "City boundary region id should normalize to canonical format")
     }
 
+    private static func testTaiwanBoundaryIsDissolvedForMapOverlay() throws {
+        let catalog = CityBoundaryCatalog(loader: { @Sendable in try Data(contentsOf: bundledCityBoundaryURL()) })
+        let cities = try catalog.loadCities()
+        let taiwan = cities.filter { $0.regionId == "CN-TW" }
+
+        try expectEqual(taiwan.count, 1, "Taiwan should be folded into one CN-TW map region")
+        try expect(
+            taiwan[0].boundaryPolygons.count < 10,
+            "CN-TW should be geometry-dissolved, not retain 21 county/city polygons"
+        )
+    }
+
+    private static func testAwardOverlayLimiterClipsToViewport() throws {
+        let nearbyLocked = mapCity("nearby-locked", minLat: 35, maxLat: 36, minLon: 139, maxLon: 140, isUnlocked: false)
+        let nearbyUnlocked = mapCity("nearby-unlocked", minLat: 35.4, maxLat: 35.8, minLon: 139.4, maxLon: 139.8, isUnlocked: true)
+        let distantLocked = mapCity("distant-locked", minLat: -34, maxLat: -33, minLon: 151, maxLon: 152, isUnlocked: false)
+        let viewport = RegionAchievementMapViewport(
+            centerLatitude: 35.5,
+            centerLongitude: 139.5,
+            latitudeDelta: 4,
+            longitudeDelta: 4
+        )
+
+        let visible = RegionAchievementMapOverlayLimiter.visibleCities(
+            in: [nearbyLocked, nearbyUnlocked, distantLocked],
+            countryCode: nil,
+            viewport: viewport
+        )
+
+        try expectEqual(
+            visible.map(\.cityKey),
+            [nearbyUnlocked.cityKey, nearbyLocked.cityKey],
+            "Track map award overlays should render only viewport-intersecting regions, with unlocked regions prioritized"
+        )
+    }
+
+    private static func testAwardOverlayLimiterDropsLockedRegionsAtBroadZoom() throws {
+        let locked = mapCity("locked", minLat: 35, maxLat: 36, minLon: 139, maxLon: 140, isUnlocked: false)
+        let unlocked = mapCity("unlocked", minLat: 37, maxLat: 38, minLon: 141, maxLon: 142, isUnlocked: true)
+        let broadViewport = RegionAchievementMapViewport(
+            centerLatitude: 0,
+            centerLongitude: 0,
+            latitudeDelta: 120,
+            longitudeDelta: 360
+        )
+
+        let visible = RegionAchievementMapOverlayLimiter.visibleCities(
+            in: [locked, unlocked],
+            countryCode: nil,
+            viewport: broadViewport
+        )
+
+        try expectEqual(
+            visible.map(\.cityKey),
+            [unlocked.cityKey],
+            "Broad zoom should keep unlocked context without rendering every locked global admin1 boundary"
+        )
+    }
+
     private static func testBundledRegionDataProviderCachesDecodedBoundaries() throws {
         let loader = CountingDataLoader(data: Data(Self.minimalCityBoundaryGeoJSON.utf8))
         let provider = BundledRegionDataProvider(loader: { @Sendable in try loader.load() })
@@ -440,6 +502,13 @@ struct FootprintLogicTests {
             .appendingPathExtension("sqlite")
     }
 
+    private static func bundledCityBoundaryURL() -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("footprint/Data/city_boundaries.geojson")
+    }
+
     private static func execSQLite(at url: URL, sql: String) throws {
         var handle: OpaquePointer?
         guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
@@ -526,6 +595,33 @@ struct FootprintLogicTests {
             nameZh: id,
             nameEn: id,
             countryCode: String(id.prefix(2))
+        )
+    }
+
+    private static func mapCity(
+        _ id: String,
+        minLat: Double,
+        maxLat: Double,
+        minLon: Double,
+        maxLon: Double,
+        isUnlocked: Bool
+    ) -> RegionAchievementMapCity {
+        RegionAchievementMapCity(
+            cityKey: id,
+            regionId: id.uppercased(),
+            countryCode: "JP",
+            countryName: "Japan",
+            adminArea: id,
+            cityName: id,
+            minLatitude: minLat,
+            maxLatitude: maxLat,
+            minLongitude: minLon,
+            maxLongitude: maxLon,
+            cellCount: isUnlocked ? 1 : 0,
+            colorIndex: 0,
+            isUnlocked: isUnlocked,
+            cityKeyAliases: [],
+            boundaryPolygons: []
         )
     }
 
