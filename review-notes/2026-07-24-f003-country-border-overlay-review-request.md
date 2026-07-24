@@ -2,7 +2,7 @@
 
 Review-Target-ID: f003
 Branch: `feat/f003-award-integration`
-Code Head: `<filled-after-commit>`
+Code Head: `cf60dbd`
 Worktree: `/Users/wuyou/Documents/APP_Project/footprint-f003-award-integration`
 
 ## What
