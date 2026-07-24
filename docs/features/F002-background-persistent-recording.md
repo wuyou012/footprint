@@ -178,3 +178,24 @@ co-creator 真机 dogfood 发现并修复一串问题（feat HEAD `d4935c0`）�
 **Merge 前 pending（真机，需 co-creator）**：
 - [ ] rebuild `d4935c0` 真机重走**纯步行**路线 → 导出新 log 确认：步行段连续 `recorded point`、`⚑ CLVisit arrival` 出现但**不再中断采样**（不再 14ms/76s start→stop）。
 - [ ] AC-5 电量对比（原 pending）。
+
+### 🔄 CLLocationUpdate 架构重构（2026-07-24，方案 v2 · 替代方案A）
+
+**背景**：方案A（CMMotion 门控）实测暴露根本困难——CMMotion 在真实携带方式下不可靠（步行大量报 unknown/低置信 stationary），在"漏记步行"和"一次 active 后永不 dormant（20 小时 GPS 常开，日志 start=1/stop=0）"之间反复横跳。co-creator 讨论后定新方案（源 `input.md`）。
+
+**重构（`9bb1ffd`）**：
+- **定位核心**：Daily/High 从 "CMMotion 门控开关 `startUpdatingLocation`" → **`CLLocationUpdate.liveUpdates` 系统 automatic pause/resume**（config Daily/Eco=`.default`、High=`.fitness`）。命门：`isStationary` 时只 flush+切段+**保留订阅**（continue 不 break），系统真正暂停硬件、挂起 app、移动自动恢复。
+- **Map Anchor 分离**：启动聚焦用一次性 `requestLocation` → 只移地图、**整批不写轨迹**（`pendingMapAnchorRequest` 隔离）。删掉旧"起始点写轨迹"。
+- **CMMotion 降级**为交通标签/诊断，不再开关 GPS/切 session。
+- **批量写**：ambient 缓冲 15 点/45s 批量 `appendTrackPoints`，flush 失败放回不丢点；手动仍即时写。
+- **省电 metrics**：standardLocationActiveSeconds/systemPausedSeconds/callbacks/batches（input.md §九验收指标）。
+- profile 密度调优：Daily filter 15m/12m、最小间隔 5s。
+
+**Review 闭环（opus cross-review + 2 Agent 深审）**：命门 isStationary continue ✅ / Map Anchor 隔离 ✅ / 批量写不丢点 ✅ / 状态机自洽（stopped/monitoring/sampling/systemPaused）✅ / 手动零回归 ✅ / SLC+liveUpdates 共存但 dedup 不重复 ✅ → minor P3（metrics 时钟混用 + 旧门控 dead code）→ 砚砚修 `8fb1215` → **focused rereview 通过**。**代码 review 放行基线 = `8fb1215`**。
+- **P2 follow-up**（预存，非本次引入）：Daily/High trip session 冷启动 orphan（未结束 open trip 不 reconcile）→ task `0001784892847770-000348-bdb11fad`。
+
+**真正验收 = 真机锁屏 dogfood（input.md §九，代码对 ≠ 省电达成）**：
+- [ ] **静止测试**：手机放桌面 6–8h → 进 systemPaused、回调接近停、轨迹写 0（对比旧"20h active"）。
+- [ ] **步行测试**：步行 20–30min → 起步自动恢复、转弯有细节、无大跳、结束能重新暂停。
+- [ ] **混合测试**：驾车→停车→步行→静止 状态正确切换。
+- 导出省电 metrics 诊断 → opus 判断 automatic pause 是否真省电。
