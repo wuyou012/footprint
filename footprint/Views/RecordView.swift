@@ -18,6 +18,12 @@ struct RecordView: View {
     @AppStorage("record.track.green") private var trackGreen = 158
     @AppStorage("record.track.blue") private var trackBlue = 184
     @AppStorage("record.awardOverlay.enabled") private var showAwardOverlay = true
+    @AppStorage("record.countryBorders.enabled") private var showCountryBorders = true
+    @AppStorage("record.countryBorder.red") private var countryBorderRed = RGBColor.defaultCountryBorder.red
+    @AppStorage("record.countryBorder.green") private var countryBorderGreen = RGBColor.defaultCountryBorder.green
+    @AppStorage("record.countryBorder.blue") private var countryBorderBlue = RGBColor.defaultCountryBorder.blue
+    @AppStorage("record.countryBorder.width") private var countryBorderLineWidth = CountryBoundaryOverlayDefaults.defaultLineWidth
+    @AppStorage("record.countryBorder.style") private var countryBorderLineStyleRaw = CountryBoundaryLineStyle.solid.rawValue
 
     @State private var mapStyle: FootprintMapStyle = .standard
     @State private var mapDimension: FootprintMapDimension = .twoD
@@ -25,9 +31,11 @@ struct RecordView: View {
     @State private var showingSettings = false
     @State private var recordingPulse = false
     @State private var awardMapCities: [RegionAchievementMapCity] = []
+    @State private var countryBoundaries: [CountryBoundary] = []
     @State private var lastAwardOverlayReloadAcceptedCount = 0
 
     private let achievementService = RegionAchievementService()
+    private let countryBoundaryCatalog = CountryBoundaryCatalog()
 
     var body: some View {
         Group {
@@ -42,6 +50,10 @@ struct RecordView: View {
                     mapTintStrength: $mapTintStrength,
                     trackColor: trackColorBinding,
                     showAwardOverlay: $showAwardOverlay,
+                    showCountryBorders: $showCountryBorders,
+                    countryBorderColor: countryBorderColorBinding,
+                    countryBorderLineWidth: countryBorderLineWidthBinding,
+                    countryBorderLineStyle: countryBorderLineStyleBinding,
                     recording: recorder.recording,
                     backgroundRecordingEnabled: recorder.backgroundRecordingEnabled,
                     persistentStatus: recorder.persistentStatus,
@@ -77,6 +89,10 @@ struct RecordView: View {
                 points: mapDisplayPoints,
                 followLatest: recorder.recording,
                 regionAwardCities: showAwardOverlay ? awardMapCities : [],
+                countryBoundaries: showCountryBorders ? countryBoundaries : [],
+                countryBoundaryColor: countryBorderColor,
+                countryBoundaryLineWidth: countryBorderLineWidth,
+                countryBoundaryLineStyle: countryBorderLineStyle,
                 mapStyle: mapStyle,
                 mapDimension: mapDimension,
                 poiVisibility: poiVisibility,
@@ -84,7 +100,7 @@ struct RecordView: View {
                 mapTintStrength: mapTintStrength,
                 appearance: mapAppearance
             )
-                .id(awardOverlayIdentity)
+                .id(mapOverlayIdentity)
                 .ignoresSafeArea()
 
             VStack {
@@ -103,6 +119,7 @@ struct RecordView: View {
         }
         .task {
             await loadAwardOverlay()
+            await loadCountryBoundaries()
         }
         .onChange(of: recorder.stats.acceptedCount) { _, _ in
             guard AwardOverlayReloadPolicy.shouldReloadAfterAcceptedPointChange(
@@ -115,6 +132,13 @@ struct RecordView: View {
         .onChange(of: showAwardOverlay) { _, enabled in
             if enabled {
                 Task { await loadAwardOverlay() }
+            }
+        }
+        .onChange(of: showCountryBorders) { _, enabled in
+            if enabled {
+                Task { await loadCountryBoundaries() }
+            } else {
+                countryBoundaries = []
             }
         }
     }
@@ -318,10 +342,19 @@ struct RecordView: View {
         return recorder.points
     }
 
-    private var awardOverlayIdentity: String {
-        guard showAwardOverlay else { return "award-overlay-off" }
-        let unlockedCount = awardMapCities.filter(\.isUnlocked).count
-        return "award-overlay-\(awardMapCities.count)-\(unlockedCount)"
+    private var mapOverlayIdentity: String {
+        let awardIdentity: String
+        if showAwardOverlay {
+            let unlockedCount = awardMapCities.filter(\.isUnlocked).count
+            awardIdentity = "award-\(awardMapCities.count)-\(unlockedCount)"
+        } else {
+            awardIdentity = "award-off"
+        }
+
+        let countryIdentity = showCountryBorders
+            ? "country-\(countryBoundaries.count)-\(countryBorderLineStyle.rawValue)-\(countryBorderLineWidth)-\(countryBorderRed)-\(countryBorderGreen)-\(countryBorderBlue)"
+            : "country-off"
+        return "\(awardIdentity)-\(countryIdentity)"
     }
 
     private var mapTintColor: RGBColor {
@@ -330,6 +363,14 @@ struct RecordView: View {
 
     private var trackColor: RGBColor {
         RGBColor(red: trackRed, green: trackGreen, blue: trackBlue)
+    }
+
+    private var countryBorderColor: RGBColor {
+        RGBColor(red: countryBorderRed, green: countryBorderGreen, blue: countryBorderBlue)
+    }
+
+    private var countryBorderLineStyle: CountryBoundaryLineStyle {
+        CountryBoundaryLineStyle(rawValue: countryBorderLineStyleRaw) ?? .solid
     }
 
     private var selectedProfile: RecordingProfile {
@@ -372,6 +413,31 @@ struct RecordView: View {
         )
     }
 
+    private var countryBorderColorBinding: Binding<RGBColor> {
+        Binding(
+            get: { countryBorderColor },
+            set: {
+                countryBorderRed = $0.red
+                countryBorderGreen = $0.green
+                countryBorderBlue = $0.blue
+            }
+        )
+    }
+
+    private var countryBorderLineWidthBinding: Binding<Double> {
+        Binding(
+            get: { CountryBoundaryOverlayDefaults.clampedLineWidth(countryBorderLineWidth) },
+            set: { countryBorderLineWidth = CountryBoundaryOverlayDefaults.clampedLineWidth($0) }
+        )
+    }
+
+    private var countryBorderLineStyleBinding: Binding<CountryBoundaryLineStyle> {
+        Binding(
+            get: { countryBorderLineStyle },
+            set: { countryBorderLineStyleRaw = $0.rawValue }
+        )
+    }
+
     private var canExportCurrentTrack: Bool {
         recorder.exportableSessionID != nil && !recorder.points.isEmpty && !recorder.recording
     }
@@ -410,6 +476,23 @@ struct RecordView: View {
             // Award overlay is additive; keep recording UI usable if catalog loading fails.
             awardMapCities = []
             FootprintLog.diag("award overlay failed: \(AppFormatters.errorMessage(error))")
+        }
+    }
+
+    @MainActor
+    private func loadCountryBoundaries() async {
+        guard showCountryBorders else {
+            countryBoundaries = []
+            FootprintLog.diag("country boundary overlay skipped: disabled")
+            return
+        }
+        do {
+            let countries = try countryBoundaryCatalog.loadCountries()
+            countryBoundaries = countries
+            FootprintLog.diag("country boundary overlay loaded: countries=\(countries.count)")
+        } catch {
+            countryBoundaries = []
+            FootprintLog.diag("country boundary overlay failed: \(AppFormatters.errorMessage(error))")
         }
     }
 

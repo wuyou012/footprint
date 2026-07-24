@@ -20,6 +20,7 @@ swiftc \
   "$ROOT/footprint/Services/AwardOverlayReloadPolicy.swift" \
   "$ROOT/footprint/Services/TrackDatabase.swift" \
   "$ROOT/footprint/Services/CityBoundaryCatalog.swift" \
+  "$ROOT/footprint/Services/CountryBoundaryCatalog.swift" \
   "$ROOT/footprint/Services/BundledRegionDataProvider.swift" \
   "$ROOT/Tests/FootprintLogicTests.swift" \
   -lsqlite3 \

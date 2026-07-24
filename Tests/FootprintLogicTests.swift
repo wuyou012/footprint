@@ -45,6 +45,9 @@ struct FootprintLogicTests {
         try testTaiwanBoundaryIsDissolvedForMapOverlay()
         try testAwardOverlayLimiterClipsToViewport()
         try testAwardOverlayLimiterDropsLockedRegionsAtBroadZoom()
+        try testCountryBoundaryCatalogAppliesChinaPolicy()
+        try testCountryBoundaryOverlayLimiterClipsToViewport()
+        try testCountryBoundaryLineWidthClamps()
         try testBundledRegionDataProviderCachesDecodedBoundaries()
         try testBundledRegionDataProviderExposesCachedCatalogSnapshot()
         try testDatabaseRegionSpatialCandidatesUseRTree()
@@ -330,6 +333,70 @@ struct FootprintLogicTests {
         )
     }
 
+    private static func testCountryBoundaryCatalogAppliesChinaPolicy() throws {
+        let catalog = CountryBoundaryCatalog(loader: { @Sendable in try Data(contentsOf: bundledCountryBoundaryURL()) })
+        let countries = try catalog.loadCountries()
+        let countryIDs = Set(countries.map(\.countryId))
+
+        try expect(countries.count >= 200, "Country boundary bundle should cover the global country outline set")
+        try expect(countryIDs.contains("CN"), "Country boundary bundle should include China")
+        try expect(!countryIDs.contains("TW"), "Taiwan should not be exposed as a separate country boundary")
+        try expect(!countryIDs.contains("TWN"), "Taiwan ADM0 component should be folded out of the rendered country set")
+
+        guard let china = countries.first(where: { $0.countryId == "CN" }) else {
+            throw TestFailure.failed("China country boundary missing")
+        }
+        try expect(china.sourceComponentRegionIds.contains("CN-TW"), "China country boundary should include folded Taiwan geometry")
+        try expect(china.sourceComponentRegionIds.contains("CN-XZ"), "China country boundary should use the policy-adjusted Tibet component")
+        try expect(!china.boundaryPolygons.isEmpty, "China country boundary should have drawable polygons")
+
+        guard let india = countries.first(where: { $0.countryId == "IN" }) else {
+            throw TestFailure.failed("India country boundary missing")
+        }
+        try expect(!india.sourceComponentRegionIds.contains("IN-AR"), "India country boundary should not keep the South Tibet admin1 component")
+    }
+
+    private static func testCountryBoundaryOverlayLimiterClipsToViewport() throws {
+        let japan = countryBoundary("JP", minLat: 30, maxLat: 46, minLon: 129, maxLon: 146)
+        let unitedStates = countryBoundary("US", minLat: 25, maxLat: 49, minLon: -125, maxLon: -66)
+        let australia = countryBoundary("AU", minLat: -44, maxLat: -10, minLon: 113, maxLon: 154)
+        let viewport = RegionAchievementMapViewport(
+            centerLatitude: 36,
+            centerLongitude: 138,
+            latitudeDelta: 10,
+            longitudeDelta: 12
+        )
+
+        let visible = CountryBoundaryMapOverlayLimiter.visibleCountries(
+            in: [unitedStates, australia, japan],
+            viewport: viewport
+        )
+
+        try expectEqual(
+            visible.map(\.countryId),
+            ["JP"],
+            "Country border overlay should render only viewport-intersecting countries"
+        )
+    }
+
+    private static func testCountryBoundaryLineWidthClamps() throws {
+        try expectApprox(
+            CountryBoundaryOverlayDefaults.clampedLineWidth(-2),
+            CountryBoundaryOverlayDefaults.minimumLineWidth,
+            "Country border line width should clamp to the minimum"
+        )
+        try expectApprox(
+            CountryBoundaryOverlayDefaults.clampedLineWidth(2.5),
+            2.5,
+            "Country border line width should preserve valid values"
+        )
+        try expectApprox(
+            CountryBoundaryOverlayDefaults.clampedLineWidth(20),
+            CountryBoundaryOverlayDefaults.maximumLineWidth,
+            "Country border line width should clamp to the maximum"
+        )
+    }
+
     private static func testBundledRegionDataProviderCachesDecodedBoundaries() throws {
         let loader = CountingDataLoader(data: Data(Self.minimalCityBoundaryGeoJSON.utf8))
         let provider = BundledRegionDataProvider(loader: { @Sendable in try loader.load() })
@@ -509,6 +576,13 @@ struct FootprintLogicTests {
             .appendingPathComponent("footprint/Data/city_boundaries.geojson")
     }
 
+    private static func bundledCountryBoundaryURL() -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("footprint/Data/country_boundaries.geojson")
+    }
+
     private static func execSQLite(at url: URL, sql: String) throws {
         var handle: OpaquePointer?
         guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
@@ -622,6 +696,38 @@ struct FootprintLogicTests {
             isUnlocked: isUnlocked,
             cityKeyAliases: [],
             boundaryPolygons: []
+        )
+    }
+
+    private static func countryBoundary(
+        _ id: String,
+        minLat: Double,
+        maxLat: Double,
+        minLon: Double,
+        maxLon: Double
+    ) -> CountryBoundary {
+        CountryBoundary(
+            countryId: id,
+            countryCode: id.lowercased(),
+            countryName: id,
+            minLatitude: minLat,
+            maxLatitude: maxLat,
+            minLongitude: minLon,
+            maxLongitude: maxLon,
+            boundaryPolygons: [
+                RegionAchievementBoundaryPolygon(
+                    id: "\(id)-0",
+                    coordinates: [
+                        RegionAchievementBoundaryCoordinate(latitude: minLat, longitude: minLon),
+                        RegionAchievementBoundaryCoordinate(latitude: minLat, longitude: maxLon),
+                        RegionAchievementBoundaryCoordinate(latitude: maxLat, longitude: maxLon),
+                        RegionAchievementBoundaryCoordinate(latitude: maxLat, longitude: minLon),
+                        RegionAchievementBoundaryCoordinate(latitude: minLat, longitude: minLon)
+                    ]
+                )
+            ],
+            sourceComponentCountryIds: [id],
+            sourceComponentRegionIds: []
         )
     }
 

@@ -101,6 +101,110 @@ nonisolated enum RegionAchievementMapOverlayLimiter {
     }
 }
 
+nonisolated struct CountryBoundary: Identifiable, Sendable {
+    let countryId: String
+    let countryCode: String
+    let countryName: String
+    let minLatitude: Double
+    let maxLatitude: Double
+    let minLongitude: Double
+    let maxLongitude: Double
+    let boundaryPolygons: [RegionAchievementBoundaryPolygon]
+    let sourceComponentCountryIds: [String]
+    let sourceComponentRegionIds: [String]
+
+    var id: String { countryId }
+
+    var mapBoundaryPolygons: [RegionAchievementBoundaryPolygon] {
+        boundaryPolygons
+    }
+
+    func intersects(_ viewport: RegionAchievementMapViewport, padding: Double = 0) -> Bool {
+        viewport.intersects(
+            minLatitude: minLatitude,
+            maxLatitude: maxLatitude,
+            minLongitude: minLongitude,
+            maxLongitude: maxLongitude,
+            padding: padding
+        )
+    }
+}
+
+nonisolated enum CountryBoundaryLineStyle: String, CaseIterable, Identifiable, Sendable {
+    case solid
+    case dashed
+    case dotted
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .solid: "Solid"
+        case .dashed: "Dashed"
+        case .dotted: "Dotted"
+        }
+    }
+
+    var dashPattern: [Double] {
+        switch self {
+        case .solid: []
+        case .dashed: [10, 7]
+        case .dotted: [2, 6]
+        }
+    }
+}
+
+nonisolated enum CountryBoundaryOverlayDefaults {
+    static let defaultLineWidth = 1.8
+    static let minimumLineWidth = 0.5
+    static let maximumLineWidth = 6.0
+
+    static func clampedLineWidth(_ value: Double) -> Double {
+        min(maximumLineWidth, max(minimumLineWidth, value))
+    }
+}
+
+nonisolated enum CountryBoundaryMapOverlayLimiter {
+    static let defaultMaxRenderedCountries = 320
+
+    private static let viewportPaddingMultiplier = 0.04
+    private static let minimumViewportPadding = 0.25
+    private static let maximumViewportPadding = 12.0
+
+    static func visibleCountries(
+        in countries: [CountryBoundary],
+        viewport: RegionAchievementMapViewport?,
+        maxRenderedCountries: Int = defaultMaxRenderedCountries
+    ) -> [CountryBoundary] {
+        let safeLimit = max(0, maxRenderedCountries)
+        guard safeLimit > 0 else { return [] }
+        guard let viewport else {
+            return cappedSorted(countries, max: safeLimit)
+        }
+
+        let visible = countries.filter { country in
+            country.intersects(viewport, padding: padding(for: viewport))
+        }
+        return cappedSorted(visible, max: safeLimit)
+    }
+
+    private static func padding(for viewport: RegionAchievementMapViewport) -> Double {
+        min(
+            maximumViewportPadding,
+            max(minimumViewportPadding, max(viewport.latitudeDelta, viewport.longitudeDelta) * viewportPaddingMultiplier)
+        )
+    }
+
+    private static func cappedSorted(_ countries: [CountryBoundary], max limit: Int) -> [CountryBoundary] {
+        Array(countries.sorted { lhs, rhs in
+            if lhs.countryId != rhs.countryId {
+                return lhs.countryId < rhs.countryId
+            }
+            return lhs.countryName < rhs.countryName
+        }.prefix(limit))
+    }
+}
+
 nonisolated struct RegionAchievementMapCountryOption: Identifiable, Hashable, Sendable {
     let countryCode: String
     let countryName: String

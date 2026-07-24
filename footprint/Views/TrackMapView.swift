@@ -176,6 +176,10 @@ struct TrackMapView: View {
     let points: [TrackPoint]
     var followLatest = false
     var regionAwardCities: [RegionAchievementMapCity] = []
+    var countryBoundaries: [CountryBoundary] = []
+    var countryBoundaryColor: RGBColor = .defaultCountryBorder
+    var countryBoundaryLineWidth: Double = CountryBoundaryOverlayDefaults.defaultLineWidth
+    var countryBoundaryLineStyle: CountryBoundaryLineStyle = .solid
     var mapStyle: FootprintMapStyle = .standard
     var mapDimension: FootprintMapDimension = .twoD
     var poiVisibility: FootprintPOIVisibility = .shown
@@ -214,6 +218,10 @@ struct TrackMapView: View {
         points: [TrackPoint],
         followLatest: Bool = false,
         regionAwardCities: [RegionAchievementMapCity] = [],
+        countryBoundaries: [CountryBoundary] = [],
+        countryBoundaryColor: RGBColor = .defaultCountryBorder,
+        countryBoundaryLineWidth: Double = CountryBoundaryOverlayDefaults.defaultLineWidth,
+        countryBoundaryLineStyle: CountryBoundaryLineStyle = .solid,
         mapStyle: FootprintMapStyle = .standard,
         mapDimension: FootprintMapDimension = .twoD,
         poiVisibility: FootprintPOIVisibility = .shown,
@@ -224,6 +232,10 @@ struct TrackMapView: View {
         self.points = points
         self.followLatest = followLatest
         self.regionAwardCities = regionAwardCities
+        self.countryBoundaries = countryBoundaries
+        self.countryBoundaryColor = countryBoundaryColor
+        self.countryBoundaryLineWidth = CountryBoundaryOverlayDefaults.clampedLineWidth(countryBoundaryLineWidth)
+        self.countryBoundaryLineStyle = countryBoundaryLineStyle
         self.mapStyle = mapStyle
         self.mapDimension = mapDimension
         self.poiVisibility = poiVisibility
@@ -277,6 +289,19 @@ struct TrackMapView: View {
                 }
             }
 
+            ForEach(visibleCountryBoundaryLines) { boundary in
+                MapPolyline(coordinates: boundary.coordinates)
+                    .stroke(
+                        countryBoundaryColor.color.opacity(0.86),
+                        style: StrokeStyle(
+                            lineWidth: countryBoundaryLineWidth,
+                            lineCap: .round,
+                            lineJoin: .round,
+                            dash: countryBoundaryDashPattern
+                        )
+                    )
+            }
+
             ForEach(segments) { segment in
                 MapPolyline(coordinates: segment.coordinates)
                     .stroke(appearance.pathColor, style: StrokeStyle(lineWidth: appearance.lineWidth, lineCap: .round, lineJoin: .round))
@@ -319,6 +344,30 @@ struct TrackMapView: View {
             countryCode: nil,
             viewport: visibleAwardViewport
         )
+    }
+
+    private var visibleCountryBoundaries: [CountryBoundary] {
+        CountryBoundaryMapOverlayLimiter.visibleCountries(
+            in: countryBoundaries,
+            viewport: visibleAwardViewport
+        )
+    }
+
+    private var visibleCountryBoundaryLines: [CountryBoundaryMapLine] {
+        visibleCountryBoundaries.flatMap { country in
+            country.mapBoundaryPolygons.map { boundary in
+                CountryBoundaryMapLine(
+                    id: "\(country.id)-\(boundary.id)",
+                    coordinates: boundary.closedMapCoordinates
+                )
+            }
+        }
+    }
+
+    private var countryBoundaryDashPattern: [CGFloat] {
+        countryBoundaryLineStyle.dashPattern.map { value in
+            CGFloat(value)
+        }
     }
 
     @ViewBuilder
@@ -573,6 +622,11 @@ private struct TrackMapPoint: Identifiable {
     let id: Int
     let coordinate: CLLocationCoordinate2D
     let radiusMeters: CLLocationDistance
+}
+
+private struct CountryBoundaryMapLine: Identifiable {
+    let id: String
+    let coordinates: [CLLocationCoordinate2D]
 }
 
 private struct TrackChangeToken: Equatable {

@@ -10,6 +10,10 @@ struct RecordSettingsView: View {
     @Binding var mapTintStrength: Double
     @Binding var trackColor: RGBColor
     @Binding var showAwardOverlay: Bool
+    @Binding var showCountryBorders: Bool
+    @Binding var countryBorderColor: RGBColor
+    @Binding var countryBorderLineWidth: Double
+    @Binding var countryBorderLineStyle: CountryBoundaryLineStyle
 
     let recording: Bool
     let backgroundRecordingEnabled: Bool
@@ -100,6 +104,35 @@ struct RecordSettingsView: View {
 
                 Section("Track") {
                     RGBColorEditor(title: "Track color", rgb: $trackColor)
+                }
+
+                Section("Country Borders") {
+                    Toggle(isOn: $showCountryBorders) {
+                        Label("显示国界线", systemImage: "globe.asia.australia.fill")
+                    }
+
+                    RGBColorEditor(title: "Border color", rgb: $countryBorderColor)
+                        .disabled(!showCountryBorders)
+
+                    Picker("Line style", selection: $countryBorderLineStyle) {
+                        ForEach(CountryBoundaryLineStyle.allCases) { style in
+                            Text(style.label)
+                                .tag(style)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(!showCountryBorders)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        LabeledContent("Line width", value: String(format: "%.1f pt", countryBorderLineWidth))
+                            .font(.subheadline)
+                        Slider(
+                            value: $countryBorderLineWidth,
+                            in: CountryBoundaryOverlayDefaults.minimumLineWidth...CountryBoundaryOverlayDefaults.maximumLineWidth,
+                            step: 0.5
+                        )
+                    }
+                    .disabled(!showCountryBorders)
                 }
 
                 Section("Awards") {
