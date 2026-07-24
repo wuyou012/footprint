@@ -56,7 +56,7 @@ Scan notes:
 ## Reviewer Focus
 
 - Please inspect whether `RegionAchievementMapOverlayLimiter` thresholds are conservative enough for simulator zoom while still showing useful close-range boundaries.
-- Please inspect the mapshaper dissolve helper in `scripts/build-global-admin1-boundaries.mjs`. I could not rerun full Natural Earth generation because the source zip is not present in this worktree; the bundled `CN-TW` rewrite used the same mapshaper dissolve command against the existing generated catalog.
+- Please inspect the mapshaper dissolve helper in `scripts/build-global-admin1-boundaries.mjs`. After review, I downloaded the official Natural Earth zip to `/tmp`, reran full generation into `/tmp/footprint-city-boundaries-full-regen.geojson`, and confirmed that the output is byte-identical to the current bundled catalog.
 - Subjective pinch/zoom smoothness still needs interactive simulator review; automated injection is limited here, but the app launches and renders after installing the new build.
 
 ## Quality Gate Report
@@ -108,6 +108,12 @@ swiftc -parse-as-library \
 
 node -e "...inspect CN-TW and catalog counts..."
 # {"total":4462,"admin1":4461,"countries":239,"cnTwPolygons":3,"cnTwComponents":21}
+
+curl -L -f -o /tmp/ne_10m_admin_1_states_provinces.zip https://naturalearth.s3.amazonaws.com/10m_cultural/ne_10m_admin_1_states_provinces.zip
+cp footprint/Data/city_boundaries.geojson /tmp/footprint-city-boundaries-full-regen.geojson
+node scripts/build-global-admin1-boundaries.mjs /tmp/ne_10m_admin_1_states_provinces.zip /tmp/footprint-city-boundaries-full-regen.geojson
+cmp -s footprint/Data/city_boundaries.geojson /tmp/footprint-city-boundaries-full-regen.geojson && echo "FULL_REGEN_MATCHES_CURRENT=YES"
+# FULL_REGEN_MATCHES_CURRENT=YES
 
 git diff --check
 # exit 0
