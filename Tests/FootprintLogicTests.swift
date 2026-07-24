@@ -64,10 +64,6 @@ struct FootprintLogicTests {
         try expectEqual(RecordingProfile.eco.ambientSessionPolicy, .daily, "Eco should group ambient points by day")
         try expectEqual(RecordingProfile.daily.ambientSessionPolicy, .trip, "Daily should group ambient points by trip")
         try expectEqual(RecordingProfile.high.ambientSessionPolicy, .trip, "High should group ambient points by trip")
-
-        try expectEqual(RecordingProfile.eco.stationaryTimeoutSeconds, 0, "Eco legacy stationary timeout")
-        try expectEqual(RecordingProfile.daily.stationaryTimeoutSeconds, 180, "Daily legacy stationary timeout")
-        try expectEqual(RecordingProfile.high.stationaryTimeoutSeconds, 300, "High legacy stationary timeout")
     }
 
     private static func testMotionGateClassifiesActivity() throws {
@@ -202,6 +198,11 @@ struct FootprintLogicTests {
         metrics.markStandardLocationStopped(atMs: 22_000)
         try expectEqual(metrics.standardLocationActiveSeconds, 15, "Active seconds should include resumed movement")
         try expectEqual(metrics.systemPausedSeconds, 6, "Paused seconds should accumulate between pause and resume")
+        try expectEqual(
+            metrics.diagnosticSummary,
+            "standardLocationActiveSeconds=15 systemPausedSeconds=6 locationCallbacks=1 acceptedTrackPoints=1 databaseWriteBatches=1 motionEvents=0",
+            "Diagnostics should expose live-update counters without stale probe fields"
+        )
     }
 
     private static func testSessionSegmenterPolicies() throws {

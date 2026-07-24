@@ -23,7 +23,7 @@ co-creator 在 `input.md` 确认新方向：Daily 不再由 CMMotion 决定开�
 - **CMMotion**：降级为交通方式标签/诊断信号，不再承担开 GPS、关 GPS、切 session 的职责。
 - **写入**：ambient points 先进入内存 buffer，满 15 点或超过 45 秒、system pause、进后台、关闭常驻、结束 segment 时批量写 SQLite。
 - **Daily 密度**：fallback `distanceFilter=15m`，保存抽稀 `minDistance=12m`、`minInterval=5s`，目标是保留 10-15m 级步行细节。
-- **诊断指标**：日志输出 `standardLocationActiveSeconds` / `systemPausedSeconds` / `locationCallbacks` / `acceptedTrackPoints` / `databaseWriteBatches` / `motionEvents` / probe 计数（当前 probe 为 0）。
+- **诊断指标**：日志输出 `standardLocationActiveSeconds` / `systemPausedSeconds` / `locationCallbacks` / `acceptedTrackPoints` / `databaseWriteBatches` / `motionEvents`。
 
 旧设计中“CMMotion 运动门控 dormant↔active”“Daily/High 按 CLVisit 切段”的描述只保留为历史，不再作为当前验收口径。
 
@@ -137,7 +137,7 @@ co-creator 在 `input.md` 确认新方向：Daily 不再由 CMMotion 决定开�
 | **`MotionGate`** | `Services/` | 封装 `CMMotionActivityManager`，输出 `isStationary` + activity 类型(walking/running/automotive/cycling/unknown) + confidence。纯信号源，可测。 |
 | **`PersistentLocationCoordinator`** | `Services/` | 常驻大脑：注册 SLC (`startMonitoringSignificantLocationChanges`) + Visit (`startMonitoringVisits`)，订阅 MotionGate，跑状态机 `.dormant`(GPS 关，SLC/Visit only) ↔ `.active`(连续 GPS，按档参数)。转移：moving→active；stationary 达档阈值→dormant。 |
 | **`SessionSegmenter`** | `Services/` 或 `TrackDatabase` 内 | 决定新点归哪个 ambient session：**Eco 按 `localDayKey` 切**（跨天开新段）；**Daily/High 按 `CLVisit` 切**（arrival 开段 / departure 结束段）。 |
-| `RecordingProfile` 扩展 | `Models/TrackModels.swift` | 更新三档参数（Eco filter ~200m / Daily ~60m / High 不变 + accuracy 分级）+ 新增常驻阈值（`stationaryTimeoutSeconds` 等）。 |
+| `RecordingProfile` 扩展 | `Models/TrackModels.swift` | 更新三档参数（Eco filter ~200m / Daily ~60m / High 不变 + accuracy 分级）。旧常驻阈值设计已由 2026-07-24 system pause 架构取代。 |
 
 ### 数据模型改动
 - `sessions` 表加 `kind TEXT`（`'manual'` | `'ambient'`）区分手动 vs 常驻自动，**保证 AC-6 不污染手动统计**。

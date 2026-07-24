@@ -563,13 +563,13 @@ final class RecordingManager: NSObject, ObservableObject {
 
     private func handleLiveLocationUpdate(_ update: CLLocationUpdate) {
         guard persistentRecordingEnabled else { return }
+        let receivedAtMs = AppFormatters.nowMs()
         persistentMetrics.markLocationCallback()
 
         if update.stationary {
-            let timestampMs = AppFormatters.nowMs()
-            persistentMetrics.markSystemPaused(atMs: timestampMs)
+            persistentMetrics.markSystemPaused(atMs: receivedAtMs)
             FootprintLog.diag("⏸ CoreLocation live update stationary=true; pausing writes but keeping subscription \(persistentMetrics.diagnosticSummary)")
-            applyPersistentCommands(persistentCoordinator.handle(.systemStationary(timestampMs: timestampMs)))
+            applyPersistentCommands(persistentCoordinator.handle(.systemStationary(timestampMs: receivedAtMs)))
             isSampling = false
             persistentStatus = "\(persistentProfile.label) system paused"
             status = "Persistent \(persistentProfile.label) paused"
@@ -577,9 +577,8 @@ final class RecordingManager: NSObject, ObservableObject {
         }
 
         guard let location = update.location else { return }
-        let timestampMs = Int64(location.timestamp.timeIntervalSince1970 * 1000)
-        persistentMetrics.markStandardLocationStarted(atMs: timestampMs)
-        applyPersistentCommands(persistentCoordinator.handle(.liveLocation(timestampMs: timestampMs)))
+        persistentMetrics.markStandardLocationStarted(atMs: receivedAtMs)
+        applyPersistentCommands(persistentCoordinator.handle(.liveLocation(timestampMs: receivedAtMs)))
         isSampling = true
         persistentStatus = "\(persistentProfile.label) live"
         status = "Persistent \(persistentProfile.label) recording"

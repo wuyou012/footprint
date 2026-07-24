@@ -76,23 +76,11 @@ enum RecordingProfile: String, CaseIterable, Identifiable {
 
     var maxSpeedMetersPerSecond: CLLocationSpeed { 70 }
 
-    var stationaryTimeoutSeconds: Int {
-        switch self {
-        case .high: 300
-        case .daily: 180
-        case .eco: 0
-        }
-    }
-
     var ambientSessionPolicy: AmbientSessionPolicy {
         switch self {
         case .high, .daily: .trip
         case .eco: .daily
         }
-    }
-
-    var usesDutyCycledAmbientLocation: Bool {
-        self == .eco
     }
 }
 

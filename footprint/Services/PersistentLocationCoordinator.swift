@@ -155,8 +155,6 @@ struct PersistentRecordingMetrics: Equatable {
     private(set) var acceptedTrackPoints = 0
     private(set) var databaseWriteBatches = 0
     private(set) var motionEvents = 0
-    private(set) var probeStartCount = 0
-    private(set) var probeActiveSeconds = 0
 
     private var activeStartedAtMs: Int64?
     private var pausedStartedAtMs: Int64?
@@ -209,7 +207,7 @@ struct PersistentRecordingMetrics: Equatable {
     }
 
     var diagnosticSummary: String {
-        "standardLocationActiveSeconds=\(standardLocationActiveSeconds) systemPausedSeconds=\(systemPausedSeconds) locationCallbacks=\(locationCallbacks) acceptedTrackPoints=\(acceptedTrackPoints) databaseWriteBatches=\(databaseWriteBatches) motionEvents=\(motionEvents) probeStartCount=\(probeStartCount) probeActiveSeconds=\(probeActiveSeconds)"
+        "standardLocationActiveSeconds=\(standardLocationActiveSeconds) systemPausedSeconds=\(systemPausedSeconds) locationCallbacks=\(locationCallbacks) acceptedTrackPoints=\(acceptedTrackPoints) databaseWriteBatches=\(databaseWriteBatches) motionEvents=\(motionEvents)"
     }
 
     private static func secondsBetween(_ startMs: Int64, _ endMs: Int64) -> Int {
