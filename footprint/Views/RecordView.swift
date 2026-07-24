@@ -67,6 +67,7 @@ struct RecordView: View {
         ZStack {
             TrackMapView(
                 points: recorder.points,
+                mapAnchorCoordinate: recorder.mapAnchorCoordinate,
                 followLatest: recorder.recording,
                 mapStyle: mapStyle,
                 mapDimension: mapDimension,

@@ -19,6 +19,7 @@ final class RecordingManager: NSObject, ObservableObject {
     @Published private(set) var persistentStatus = "Off"
     /// True while CLLocationManager is actively sampling GPS (manual or ambient). Drives the on-screen REC indicator.
     @Published private(set) var isSampling = false
+    @Published private(set) var mapAnchorCoordinate: CLLocationCoordinate2D?
 
     private let locationManager = CLLocationManager()
     private let store = TrackDatabase.shared
@@ -27,10 +28,17 @@ final class RecordingManager: NSObject, ObservableObject {
     private var persistentCoordinator: PersistentLocationCoordinator
     private var ambientSegmenter: SessionSegmenter
     private var pendingPersistentProfile: RecordingProfile?
+    private var liveLocationTask: Task<Void, Never>?
+    private var pendingMapAnchorRequest = false
+    private var pendingAmbientTrackPoints: [TrackPoint] = []
+    private var pendingAmbientTrackPointsSinceMs: Int64?
+    private var persistentMetrics = PersistentRecordingMetrics()
     private var timer: Timer?
     private var lifecycleObservers: [NSObjectProtocol] = []
     private var userInterfaceActive = true
     private let maxVisiblePoints = 3_000
+    private let ambientWriteBatchLimit = 15
+    private let ambientWriteBatchMaxAgeMs: Int64 = 45_000
     private static let persistentEnabledKey = "record.persistent.enabled"
     private static let persistentProfileKey = "record.persistent.profile"
 
@@ -66,6 +74,7 @@ final class RecordingManager: NSObject, ObservableObject {
             NotificationCenter.default.removeObserver(observer)
         }
         timer?.invalidate()
+        liveLocationTask?.cancel()
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
         locationManager.stopMonitoringVisits()
@@ -258,6 +267,11 @@ final class RecordingManager: NSObject, ObservableObject {
 
     private func appDidEnterBackground() {
         userInterfaceActive = false
+        do {
+            try flushPendingTrackPoints()
+        } catch {
+            errorMessage = AppFormatters.errorMessage(error)
+        }
         timer?.invalidate()
         timer = nil
         if recording {
@@ -325,6 +339,7 @@ final class RecordingManager: NSObject, ObservableObject {
         persistentProfile = profile
         persistentCoordinator = PersistentLocationCoordinator(profile: profile)
         ambientSegmenter = SessionSegmenter(profile: profile)
+        persistentMetrics = PersistentRecordingMetrics()
         persistentRecordingEnabled = true
         persistentStatus = "Checking permissions"
         UserDefaults.standard.set(true, forKey: Self.persistentEnabledKey)
@@ -362,47 +377,44 @@ final class RecordingManager: NSObject, ObservableObject {
 
         persistentProfile = profile
         persistentCoordinator.updateProfile(profile)
-        locationManager.allowsBackgroundLocationUpdates = true
-        locationManager.showsBackgroundLocationIndicator = false
-        locationManager.pausesLocationUpdatesAutomatically = true
-        locationManager.desiredAccuracy = profile.desiredAccuracy
-        locationManager.distanceFilter = profile.distanceFilter
-        locationManager.startMonitoringSignificantLocationChanges()
-        locationManager.startMonitoringVisits()
+        configurePersistentLocationManager(profile: profile)
         #if canImport(CoreMotion)
         motionProvider.start()
         #endif
+        applyPersistentCommands(persistentCoordinator.handle(.enabled(timestampMs: AppFormatters.nowMs())))
         backgroundRecordingEnabled = true
-        FootprintLog.diag("✔︎ persistent monitoring started \(profile.label) (SLC+Visit+Motion)")
+        FootprintLog.diag("✔︎ persistent monitoring started \(profile.label) strategy=\(String(describing: profile.persistentLocationStrategy))")
         persistentStatus = "\(profile.label) ready"
         status = "Persistent \(profile.label) ready"
-        // 起始先记录一次当前位置：用户开启常驻后立刻有起始点，不必等移动才触发第一个点。
-        locationManager.requestLocation()
+        requestMapAnchorLocation()
     }
 
     private func disablePersistentRecording() {
         pendingPersistentProfile = nil
-        UserDefaults.standard.set(false, forKey: Self.persistentEnabledKey)
-        persistentRecordingEnabled = false
-        persistentStatus = "Off"
-        ambientSegmenter.reset()
-        _ = persistentCoordinator.handle(.disabled(timestampMs: AppFormatters.nowMs()))
+        let commands = persistentCoordinator.handle(.disabled(timestampMs: AppFormatters.nowMs()))
+        applyPersistentCommands(commands)
         #if canImport(CoreMotion)
         motionProvider.stop()
         #endif
+        locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
         locationManager.stopMonitoringVisits()
-        locationManager.stopUpdatingLocation()
+        pendingMapAnchorRequest = false
         isSampling = false
         locationManager.allowsBackgroundLocationUpdates = false
         locationManager.pausesLocationUpdatesAutomatically = false
         finishAmbientSession(stopReason: "persistent_off")
+        ambientSegmenter.reset()
+        UserDefaults.standard.set(false, forKey: Self.persistentEnabledKey)
+        persistentRecordingEnabled = false
+        persistentStatus = "Off"
         backgroundRecordingEnabled = false
         status = "Persistent recording off"
     }
 
     private func handleMotionDecision(_ decision: MotionDecision, timestampMs: Int64) {
         guard persistentRecordingEnabled else { return }
+        persistentMetrics.markMotionEvent()
         let signal: PersistentMotionSignal
         switch decision {
         case .stationary:
@@ -418,43 +430,168 @@ final class RecordingManager: NSObject, ObservableObject {
     private func applyPersistentCommands(_ commands: [PersistentLocationCommand]) {
         for command in commands {
             switch command {
-            case .startContinuousLocation(let profile), .startDutyCycledLocation(let profile):
-                startAmbientLocationUpdates(profile: profile)
-            case .stopContinuousLocation:
-                stopAmbientLocationUpdates()
+            case .startSystemManagedLocation(let profile):
+                startSystemManagedLocation(profile: profile)
+            case .stopSystemManagedLocation:
+                stopSystemManagedLocation()
+            case .startLowPowerMonitoring(let profile):
+                startLowPowerMonitoring(profile: profile)
+            case .stopLowPowerMonitoring:
+                stopLowPowerMonitoring()
+            case .flushPendingTrackPoints:
+                do {
+                    try flushPendingTrackPoints()
+                } catch {
+                    errorMessage = AppFormatters.errorMessage(error)
+                    status = "Persistent write failed"
+                }
+            case .finishCurrentSegment(let reason):
+                finishAmbientSession(stopReason: reason)
+                if persistentProfile.ambientSessionPolicy == .trip {
+                    ambientSegmenter.endCurrentSegment()
+                }
             }
         }
     }
 
-    private func startAmbientLocationUpdates(profile: RecordingProfile) {
+    private func startSystemManagedLocation(profile: RecordingProfile) {
         guard persistentRecordingEnabled, activeSession?.kind != .manual else { return }
-        locationManager.desiredAccuracy = profile.desiredAccuracy
-        locationManager.distanceFilter = profile.distanceFilter
-        locationManager.pausesLocationUpdatesAutomatically = true
-        locationManager.allowsBackgroundLocationUpdates = true
-        locationManager.startUpdatingLocation()
+        configurePersistentLocationManager(profile: profile)
+        startLowPowerMonitoring(profile: profile)
+        liveLocationTask?.cancel()
+        liveLocationTask = Task { [weak self] in
+            do {
+                for try await update in CLLocationUpdate.liveUpdates(Self.liveUpdateConfiguration(for: profile)) {
+                    self?.handleLiveLocationUpdate(update)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.handleLiveLocationError(error)
+            }
+        }
+        persistentMetrics.markStandardLocationStarted(atMs: AppFormatters.nowMs())
         isSampling = true
-        FootprintLog.diag("▶︎ start ambient sampling \(profile.label) filter=\(Int(profile.distanceFilter))m")
-        persistentStatus = "\(profile.label) sampling"
+        FootprintLog.diag("▶︎ start system-managed live updates \(profile.label) config=\(Self.liveUpdateConfigurationLabel(for: profile)) \(persistentMetrics.diagnosticSummary)")
+        persistentStatus = "\(profile.label) live"
         status = "Persistent \(profile.label) recording"
     }
 
-    private func stopAmbientLocationUpdates() {
-        guard persistentRecordingEnabled else { return }
-        locationManager.stopUpdatingLocation()
+    private func stopSystemManagedLocation() {
+        persistentMetrics.markStandardLocationStopped(atMs: AppFormatters.nowMs())
+        liveLocationTask?.cancel()
+        liveLocationTask = nil
+        stopLowPowerMonitoring()
         isSampling = false
-        FootprintLog.diag("⏸ stop ambient sampling (dormant/stationary)")
+        FootprintLog.diag("■ stop system-managed live updates \(persistentMetrics.diagnosticSummary)")
         persistentStatus = "\(persistentProfile.label) ready"
-        if persistentProfile.ambientSessionPolicy == .trip {
-            // 方案 A：长静止进 dormant = 一段行程结束；再移动时开新段。
-            finishAmbientSession(stopReason: "stationary")
-            ambientSegmenter.endCurrentSegment()
-        }
         if activeSession == nil {
             recording = false
             stats = .idle
             status = "Persistent \(persistentProfile.label) ready"
         }
+    }
+
+    private func startLowPowerMonitoring(profile: RecordingProfile) {
+        configurePersistentLocationManager(profile: profile)
+        locationManager.startMonitoringSignificantLocationChanges()
+        locationManager.startMonitoringVisits()
+        FootprintLog.diag("◌ low-power monitors active \(profile.label) (SLC+Visit)")
+    }
+
+    private func stopLowPowerMonitoring() {
+        locationManager.stopMonitoringSignificantLocationChanges()
+        locationManager.stopMonitoringVisits()
+        FootprintLog.diag("◌ low-power monitors stopped")
+    }
+
+    private func configurePersistentLocationManager(profile: RecordingProfile) {
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.showsBackgroundLocationIndicator = false
+        locationManager.pausesLocationUpdatesAutomatically = true
+        locationManager.desiredAccuracy = profile.desiredAccuracy
+        locationManager.distanceFilter = profile.distanceFilter
+    }
+
+    private func requestMapAnchorLocation() {
+        pendingMapAnchorRequest = true
+        locationManager.requestLocation()
+        FootprintLog.diag("◎ request map anchor location")
+    }
+
+    private func handleMapAnchorLocation(_ location: CLLocation) {
+        guard Self.isUsableMapAnchor(location) else {
+            FootprintLog.diag("◎ rejected map anchor age=\(Int(abs(location.timestamp.timeIntervalSinceNow)))s acc=\(Int(location.horizontalAccuracy))m")
+            return
+        }
+        mapAnchorCoordinate = location.coordinate
+        FootprintLog.diag("◎ map anchor updated lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) acc=\(Int(location.horizontalAccuracy))m")
+    }
+
+    private static func isUsableMapAnchor(_ location: CLLocation) -> Bool {
+        let ageSeconds = abs(location.timestamp.timeIntervalSinceNow)
+        return ageSeconds <= 30 * 60
+            && location.horizontalAccuracy >= 0
+            && location.horizontalAccuracy <= 2_000
+    }
+
+    private static func liveUpdateConfiguration(for profile: RecordingProfile) -> CLLocationUpdate.LiveConfiguration {
+        switch profile {
+        case .high:
+            .fitness
+        case .daily, .eco:
+            .default
+        }
+    }
+
+    private static func liveUpdateConfigurationLabel(for profile: RecordingProfile) -> String {
+        switch liveUpdateConfiguration(for: profile) {
+        case .default:
+            "default"
+        case .fitness:
+            "fitness"
+        case .automotiveNavigation:
+            "automotiveNavigation"
+        case .otherNavigation:
+            "otherNavigation"
+        case .airborne:
+            "airborne"
+        @unknown default:
+            "unknown"
+        }
+    }
+
+    private func handleLiveLocationUpdate(_ update: CLLocationUpdate) {
+        guard persistentRecordingEnabled else { return }
+        persistentMetrics.markLocationCallback()
+
+        if update.stationary {
+            let timestampMs = AppFormatters.nowMs()
+            persistentMetrics.markSystemPaused(atMs: timestampMs)
+            FootprintLog.diag("⏸ CoreLocation live update stationary=true; pausing writes but keeping subscription \(persistentMetrics.diagnosticSummary)")
+            applyPersistentCommands(persistentCoordinator.handle(.systemStationary(timestampMs: timestampMs)))
+            isSampling = false
+            persistentStatus = "\(persistentProfile.label) system paused"
+            status = "Persistent \(persistentProfile.label) paused"
+            return
+        }
+
+        guard let location = update.location else { return }
+        let timestampMs = Int64(location.timestamp.timeIntervalSince1970 * 1000)
+        persistentMetrics.markStandardLocationStarted(atMs: timestampMs)
+        applyPersistentCommands(persistentCoordinator.handle(.liveLocation(timestampMs: timestampMs)))
+        isSampling = true
+        persistentStatus = "\(persistentProfile.label) live"
+        status = "Persistent \(persistentProfile.label) recording"
+        handlePersistentLocation(location)
+    }
+
+    private func handleLiveLocationError(_ error: Error) {
+        guard persistentRecordingEnabled else { return }
+        errorMessage = AppFormatters.errorMessage(error)
+        status = "Persistent location failed"
+        persistentStatus = "\(persistentProfile.label) error"
+        FootprintLog.diag("✖︎ live updates failed \(AppFormatters.errorMessage(error))")
     }
 
     private func handlePersistentLocation(_ location: CLLocation) {
@@ -478,7 +615,7 @@ final class RecordingManager: NSObject, ObservableObject {
                 try startAmbientSession(
                     profile: persistentProfile,
                     startMs: timestampMs,
-                    origin: persistentProfile.ambientSessionPolicy == .daily ? .day : .visit
+                    origin: persistentProfile.ambientSessionPolicy == .daily ? .day : .trip
                 )
             }
         case .startNew(let origin, _):
@@ -528,6 +665,7 @@ final class RecordingManager: NSObject, ObservableObject {
         timer?.invalidate()
         timer = nil
         do {
+            try flushPendingTrackPoints()
             try store.finishRecordingSession(
                 sessionID: session.sessionID,
                 segmentID: session.segmentID,
@@ -549,8 +687,7 @@ final class RecordingManager: NSObject, ObservableObject {
 
     private func handleVisit(_ visit: CLVisit) {
         guard persistentRecordingEnabled else { return }
-        // 方案 A：visit 不再影响记录或分段（iOS 步行误报严重）。记录与段边界都由运动门控决定。
-        FootprintLog.diag("⚑ CLVisit ignored (motion gating owns recording + segmentation)")
+        FootprintLog.diag("⚑ CLVisit observed lat=\(visit.coordinate.latitude) lng=\(visit.coordinate.longitude); live updates own Daily segmentation")
     }
 
     private func handle(_ location: CLLocation, source: String = "gps") {
@@ -576,7 +713,10 @@ final class RecordingManager: NSObject, ObservableObject {
         switch LocationFilter.shouldAccept(previous: session.lastAccepted, candidate: candidate, profile: session.profile) {
         case .accept(let distanceMeters, _):
             do {
-                try store.appendTrackPoint(candidate)
+                try persistAcceptedTrackPoint(candidate, sessionKind: session.kind)
+                if session.kind == .ambient {
+                    persistentMetrics.markAcceptedTrackPoint()
+                }
                 session.acceptedCount += 1
                 session.distanceMeters += distanceMeters ?? 0
                 session.lastAccepted = candidate
@@ -597,6 +737,40 @@ final class RecordingManager: NSObject, ObservableObject {
             if userInterfaceActive {
                 refreshStats()
             }
+        }
+    }
+
+    private func persistAcceptedTrackPoint(_ point: TrackPoint, sessionKind: RecordingSessionKind) throws {
+        guard sessionKind == .ambient else {
+            try store.appendTrackPoint(point)
+            return
+        }
+
+        pendingAmbientTrackPoints.append(point)
+        if pendingAmbientTrackPointsSinceMs == nil {
+            pendingAmbientTrackPointsSinceMs = point.timestampMs
+        }
+
+        let oldestPendingMs = pendingAmbientTrackPointsSinceMs ?? point.timestampMs
+        let pendingAgeMs = max(0, point.timestampMs - oldestPendingMs)
+        if pendingAmbientTrackPoints.count >= ambientWriteBatchLimit || pendingAgeMs >= ambientWriteBatchMaxAgeMs {
+            try flushPendingTrackPoints()
+        }
+    }
+
+    private func flushPendingTrackPoints() throws {
+        guard !pendingAmbientTrackPoints.isEmpty else { return }
+        let batch = pendingAmbientTrackPoints
+        pendingAmbientTrackPoints.removeAll(keepingCapacity: true)
+        pendingAmbientTrackPointsSinceMs = nil
+        do {
+            try store.appendTrackPoints(batch)
+            persistentMetrics.markDatabaseWriteBatch()
+            FootprintLog.diag("▣ flushed ambient track batch count=\(batch.count) \(persistentMetrics.diagnosticSummary)")
+        } catch {
+            pendingAmbientTrackPoints = batch + pendingAmbientTrackPoints
+            pendingAmbientTrackPointsSinceMs = batch.first?.timestampMs
+            throw error
         }
     }
 
@@ -657,10 +831,27 @@ extension RecordingManager: CLLocationManagerDelegate {
 
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         Task { @MainActor in
+            if pendingMapAnchorRequest {
+                pendingMapAnchorRequest = false
+                if let location = locations.reversed().first(where: Self.isUsableMapAnchor) ?? locations.last {
+                    handleMapAnchorLocation(location)
+                }
+                return
+            }
+
             for location in locations {
-                if persistentRecordingEnabled, activeSession?.kind != .manual {
+                let destination = LocationUpdateRouter.destination(
+                    pendingMapAnchor: false,
+                    persistentRecordingEnabled: persistentRecordingEnabled,
+                    activeSessionKind: activeSession?.kind
+                )
+
+                switch destination {
+                case .mapAnchor:
+                    handleMapAnchorLocation(location)
+                case .persistentTrack:
                     handlePersistentLocation(location)
-                } else {
+                case .manualTrack:
                     handle(location)
                 }
             }

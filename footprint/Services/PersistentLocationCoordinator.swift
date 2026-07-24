@@ -1,8 +1,10 @@
 import Foundation
 
 enum PersistentLocationState: Equatable {
-    case dormant
-    case active
+    case stopped
+    case monitoring
+    case sampling
+    case systemPaused
 }
 
 enum PersistentMotionSignal: Equatable {
@@ -12,23 +14,44 @@ enum PersistentMotionSignal: Equatable {
 }
 
 enum PersistentLocationEvent: Equatable {
+    case enabled(timestampMs: Int64)
     case motion(PersistentMotionSignal, timestampMs: Int64)
+    case liveLocation(timestampMs: Int64)
+    case systemStationary(timestampMs: Int64)
     case significantLocation(timestampMs: Int64)
     case visitArrival(timestampMs: Int64)
     case disabled(timestampMs: Int64)
 }
 
 enum PersistentLocationCommand: Equatable {
-    case startContinuousLocation(profile: RecordingProfile)
-    case startDutyCycledLocation(profile: RecordingProfile)
-    case stopContinuousLocation
+    case startSystemManagedLocation(profile: RecordingProfile)
+    case stopSystemManagedLocation
+    case startLowPowerMonitoring(profile: RecordingProfile)
+    case stopLowPowerMonitoring
+    case flushPendingTrackPoints
+    case finishCurrentSegment(reason: String)
+}
+
+enum PersistentLocationStrategy: Equatable {
+    case lowPowerMonitoring
+    case systemManagedUpdates
+}
+
+extension RecordingProfile {
+    var persistentLocationStrategy: PersistentLocationStrategy {
+        switch self {
+        case .eco:
+            .lowPowerMonitoring
+        case .daily, .high:
+            .systemManagedUpdates
+        }
+    }
 }
 
 struct PersistentLocationCoordinator {
-    private(set) var state: PersistentLocationState = .dormant
+    private(set) var state: PersistentLocationState = .stopped
 
     private var profile: RecordingProfile
-    private var stationarySinceMs: Int64?
 
     init(profile: RecordingProfile) {
         self.profile = profile
@@ -40,55 +63,156 @@ struct PersistentLocationCoordinator {
 
     mutating func handle(_ event: PersistentLocationEvent) -> [PersistentLocationCommand] {
         switch event {
+        case .enabled:
+            return handleEnabled()
         case .motion(let signal, let timestampMs):
             return handleMotion(signal, timestampMs: timestampMs)
+        case .liveLocation:
+            return handleLiveLocation()
+        case .systemStationary:
+            return handleSystemStationary()
         case .significantLocation:
             return []
         case .visitArrival:
-            // Visit 不再控制记录开关。实测步行时 iOS 频繁误报 visit 到达，旧逻辑会
-            // dormant + 停 GPS → app 被挂起 → 整段步行丢失。记录 active/dormant 只由
-            // 运动门控(CMMotion)决定；visit 仅用于 SessionSegmenter 的 trip 切段。
             return []
         case .disabled:
-            guard state == .active else {
-                stationarySinceMs = nil
-                return []
-            }
-            state = .dormant
-            stationarySinceMs = nil
-            return [.stopContinuousLocation]
+            return handleDisabled()
         }
     }
 
-    private mutating func handleMotion(_ signal: PersistentMotionSignal, timestampMs: Int64) -> [PersistentLocationCommand] {
-        switch signal {
-        case .moving:
-            stationarySinceMs = nil
-            guard state == .dormant else { return [] }
-            state = .active
-            return profile.usesDutyCycledAmbientLocation
-                ? [.startDutyCycledLocation(profile: profile)]
-                : [.startContinuousLocation(profile: profile)]
-
-        case .stationary:
-            guard state == .active else { return [] }
-            if profile.stationaryTimeoutSeconds == 0 {
-                state = .dormant
-                stationarySinceMs = nil
-                return [.stopContinuousLocation]
-            }
-
-            let sinceMs = stationarySinceMs ?? timestampMs
-            stationarySinceMs = sinceMs
-            let elapsedSeconds = max(0, TimeInterval(timestampMs - sinceMs) / 1000)
-            guard elapsedSeconds >= TimeInterval(profile.stationaryTimeoutSeconds) else { return [] }
-
-            state = .dormant
-            stationarySinceMs = nil
-            return [.stopContinuousLocation]
-
-        case .unknown:
-            return []
+    private mutating func handleEnabled() -> [PersistentLocationCommand] {
+        switch profile.persistentLocationStrategy {
+        case .lowPowerMonitoring:
+            guard state == .stopped else { return [] }
+            state = .monitoring
+            return [.startLowPowerMonitoring(profile: profile)]
+        case .systemManagedUpdates:
+            guard state == .stopped else { return [] }
+            state = .sampling
+            return [.startSystemManagedLocation(profile: profile)]
         }
+    }
+
+    private mutating func handleDisabled() -> [PersistentLocationCommand] {
+        switch state {
+        case .stopped:
+            return []
+        case .monitoring:
+            state = .stopped
+            return [.stopLowPowerMonitoring]
+        case .sampling, .systemPaused:
+            state = .stopped
+            return [.flushPendingTrackPoints, .stopSystemManagedLocation]
+        }
+    }
+
+    private mutating func handleLiveLocation() -> [PersistentLocationCommand] {
+        if state == .systemPaused {
+            state = .sampling
+        }
+        return []
+    }
+
+    private mutating func handleSystemStationary() -> [PersistentLocationCommand] {
+        guard state == .sampling else { return [] }
+        state = .systemPaused
+        return [.flushPendingTrackPoints, .finishCurrentSegment(reason: "system_paused")]
+    }
+
+    private mutating func handleMotion(_ signal: PersistentMotionSignal, timestampMs: Int64) -> [PersistentLocationCommand] {
+        _ = signal
+        _ = timestampMs
+        return []
+    }
+}
+
+enum LocationUpdateDestination: Equatable {
+    case mapAnchor
+    case persistentTrack
+    case manualTrack
+}
+
+enum LocationUpdateRouter {
+    static func destination(
+        pendingMapAnchor: Bool,
+        persistentRecordingEnabled: Bool,
+        activeSessionKind: RecordingSessionKind?
+    ) -> LocationUpdateDestination {
+        if pendingMapAnchor {
+            return .mapAnchor
+        }
+        if persistentRecordingEnabled, activeSessionKind != .manual {
+            return .persistentTrack
+        }
+        return .manualTrack
+    }
+}
+
+struct PersistentRecordingMetrics: Equatable {
+    private(set) var standardLocationActiveSeconds = 0
+    private(set) var systemPausedSeconds = 0
+    private(set) var locationCallbacks = 0
+    private(set) var acceptedTrackPoints = 0
+    private(set) var databaseWriteBatches = 0
+    private(set) var motionEvents = 0
+    private(set) var probeStartCount = 0
+    private(set) var probeActiveSeconds = 0
+
+    private var activeStartedAtMs: Int64?
+    private var pausedStartedAtMs: Int64?
+
+    mutating func markStandardLocationStarted(atMs timestampMs: Int64) {
+        if let pausedStartedAtMs {
+            systemPausedSeconds += Self.secondsBetween(pausedStartedAtMs, timestampMs)
+            self.pausedStartedAtMs = nil
+        }
+        if activeStartedAtMs == nil {
+            activeStartedAtMs = timestampMs
+        }
+    }
+
+    mutating func markSystemPaused(atMs timestampMs: Int64) {
+        if let activeStartedAtMs {
+            standardLocationActiveSeconds += Self.secondsBetween(activeStartedAtMs, timestampMs)
+            self.activeStartedAtMs = nil
+        }
+        if pausedStartedAtMs == nil {
+            pausedStartedAtMs = timestampMs
+        }
+    }
+
+    mutating func markStandardLocationStopped(atMs timestampMs: Int64) {
+        if let activeStartedAtMs {
+            standardLocationActiveSeconds += Self.secondsBetween(activeStartedAtMs, timestampMs)
+            self.activeStartedAtMs = nil
+        }
+        if let pausedStartedAtMs {
+            systemPausedSeconds += Self.secondsBetween(pausedStartedAtMs, timestampMs)
+            self.pausedStartedAtMs = nil
+        }
+    }
+
+    mutating func markLocationCallback() {
+        locationCallbacks += 1
+    }
+
+    mutating func markAcceptedTrackPoint() {
+        acceptedTrackPoints += 1
+    }
+
+    mutating func markDatabaseWriteBatch() {
+        databaseWriteBatches += 1
+    }
+
+    mutating func markMotionEvent() {
+        motionEvents += 1
+    }
+
+    var diagnosticSummary: String {
+        "standardLocationActiveSeconds=\(standardLocationActiveSeconds) systemPausedSeconds=\(systemPausedSeconds) locationCallbacks=\(locationCallbacks) acceptedTrackPoints=\(acceptedTrackPoints) databaseWriteBatches=\(databaseWriteBatches) motionEvents=\(motionEvents) probeStartCount=\(probeStartCount) probeActiveSeconds=\(probeActiveSeconds)"
+    }
+
+    private static func secondsBetween(_ startMs: Int64, _ endMs: Int64) -> Int {
+        max(0, Int((endMs - startMs) / 1_000))
     }
 }

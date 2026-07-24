@@ -8,8 +8,24 @@ created: 2026-07-10
 
 # F002: Background Persistent Recording（后台常驻记录 + 三档省电）
 
-> Status: spec | Owner: 砚砚（缅因猫/gpt，实现）| Design: opus（布偶猫/opus-4-8）
+> Status: implementation in `feat/f002-background-persistent-recording`, pending review + real-device dogfood | Owner: 砚砚（缅因猫/gpt，实现）| Design: opus（布偶猫/opus-4-8）
 > Branch: **`main`**（核心记录功能）| Related: F001（点亮系统消费本 feature 产出的轨迹点）
+
+## 2026-07-24 Architecture Update（supersedes original motion-gated design）
+
+co-creator 在 `input.md` 确认新方向：Daily 不再由 CMMotion 决定开关 GPS，而是使用 iOS 17+ `CLLocationUpdate.liveUpdates(.default)` 维护一个**系统管理的逻辑定位订阅**。
+
+当前实现口径：
+
+- **Map Anchor 分离**：启动/开启常驻时的一次性 `requestLocation()` 只更新地图 anchor，不创建 ambient session、不写 `track_points`。
+- **Daily / High**：启动 `CLLocationUpdate.liveUpdates`；收到 `update.stationary == true` 时 flush pending points + 结束当前 trip，但**不取消订阅**，后续 live location 自动恢复并开启新 trip。
+- **Eco**：只启 SLC + Visit 低功耗监控；CMMotion 不再拉起标准 GPS。
+- **CMMotion**：降级为交通方式标签/诊断信号，不再承担开 GPS、关 GPS、切 session 的职责。
+- **写入**：ambient points 先进入内存 buffer，满 15 点或超过 45 秒、system pause、进后台、关闭常驻、结束 segment 时批量写 SQLite。
+- **Daily 密度**：fallback `distanceFilter=15m`，保存抽稀 `minDistance=12m`、`minInterval=5s`，目标是保留 10-15m 级步行细节。
+- **诊断指标**：日志输出 `standardLocationActiveSeconds` / `systemPausedSeconds` / `locationCallbacks` / `acceptedTrackPoints` / `databaseWriteBatches` / `motionEvents` / probe 计数（当前 probe 为 0）。
+
+旧设计中“CMMotion 运动门控 dormant↔active”“Daily/High 按 CLVisit 切段”的描述只保留为历史，不再作为当前验收口径。
 
 ## Why
 
@@ -31,7 +47,7 @@ created: 2026-07-10
    - OFF（默认）：维持现状——点 Start 才记。
    - ON：app 启动即注册常驻定位，**无需点 Start**；被划掉也靠 SLC/Visit 唤醒续记。
 2. **三档不变**（省电/普通/运行 = Eco/Daily/High），重新定义为**"省电↔保真"滑块**，共用省电引擎，激进度不同。
-3. **省电引擎**：CMMotion 运动门控 + SLC/Visit 静止基线 + 精度分级 + 系统自动暂停——静止不烧 GPS。
+3. **省电引擎**：Daily/High 使用 `CLLocationUpdate` 的 system pause/resume；Eco 使用 SLC/Visit；CMMotion 只做标签/诊断。
 
 ## 核心设计：三档运行方式 + 省电引擎
 
@@ -86,29 +102,29 @@ created: 2026-07-10
 
 - [ ] **AC-1（常驻入口）**：左菜单有"后台常驻记录"开关；开启后不点 Start，进后台+走动，回来见新点。→ Why"不该每次点 Start"
 - [ ] **AC-2（被杀唤醒）**：开启后从后台划掉 app，走 ≥500m，SLC 唤醒续记。→ Why"被划掉也持续"
-- [ ] **AC-3（三档参数）**：三档按上表 accuracy/filter/分组实现；日志证明静止时连续 GPS 关闭、退 SLC。→ Why"不烧电常驻"
-- [ ] **AC-4（运动门控）**：CMMotion 报 stationary 达阈值后停连续 GPS；报 walking/automotive 后拉起。→ 省电引擎
+- [ ] **AC-3（三档参数）**：Eco/Daily/High 按新版 profile 实现；Daily fallback filter 15m、保存抽稀 12m/5s；日志证明 system pause 后 location callbacks/DB writes 下降。→ Why"不烧电常驻"
+- [ ] **AC-4（system pause/resume）**：Daily 收到 `CLLocationUpdate.stationary` 后 flush + 结束 trip，但不取消 live-update subscription；再次移动收到 live location 后自动恢复并开新 trip。→ 省电引擎
 - [ ] **AC-5（续航实测）**：普通档日常通勤半天真机实测，电量对比现有连续模式显著下降（给两组数字）。→ Why"续航"
-- [ ] **AC-6（分组正确）**：省电档一天 1 段；普通/运动档按 CLVisit 切多段；均**不污染**手动 Start session 统计/导出。→ 见分段分析
+- [ ] **AC-6（分组正确）**：省电档一天 1 段；Daily/High 按 system pause 切 trip；均**不污染**手动 Start session 统计/导出。→ 见分段分析
 - [ ] **AC-7（查看兼容）**：History/DayDetail 正确显示自动分段（省电 1 段、普通/运动多段），SessionRow 时间段+距离正确。→ 分段查看分析
-- [ ] **AC-8（授权隐私）**：Always + Motion 授权引导清晰；常驻开启有状态提示 + 隐私/耗电说明文案。
+- [ ] **AC-8（授权隐私）**：Always 授权、后台定位说明、Motion 作为标签/诊断的授权文案清晰；常驻开启有状态提示 + 隐私/耗电说明文案。
 
 ## Dependencies
 - `main` 核心 `RecordingManager` / `LocationFilter` / `RecordingProfile` / `TrackDatabase`（增强不推翻）。
 - Info.plist：`UIBackgroundModes: location` + `NSLocationAlwaysAndWhenInUseUsageDescription`（核实是否已配）。
-- Core Motion `CMMotionActivityManager` + `NSMotionUsageDescription`。
+- Core Motion `CMMotionActivityManager` + `NSMotionUsageDescription`（仅标签/诊断，不再控制定位硬件）。
 - **顺带修（resume guide 核心 debt）**：`TrackDatabase.migrate()` 无条件 `PRAGMA user_version=1` → 改"读 currentVersion、只升不降"，避免跨分支切换降级共享 dev DB。碰核心 GPS 正好一起修。
 
 ## Risk
-- **常驻恢复延迟**：`pausesLocationUpdatesAutomatically` + SLC 恢复非瞬时；快速短途可能漏头几个点。缓解：CMMotion 抢先拉起 + Visit 补。
+- **常驻恢复延迟**：`CLLocationUpdate` system pause 后恢复由系统决定；快速短途可能漏头几个点。缓解：SLC/Visit 低功耗 wakeup + dogfood 观察。
 - **App Store 正当性**：Always + 后台定位需清晰隐私说明；个人自用无碍，上架需正当性文案。
-- **CMMotion 置信度**：低置信读数结合位移变化兜底（[NSHipster](https://nshipster.com/cmmotionactivity/)）。
+- **CMMotion 置信度**：不再用于开关 GPS，低置信读数只进标签/诊断，避免再次造成“步行漏记/永不 dormant”摆动。
 - **电量目标未实测**：续航数字是设计目标，**必须真机 dogfood 校准**，不当实测结论宣传。
 
 ## Open Questions
-- **OQ-1（会话分组）✅ 已定（co-creator 2026-07-10）**：**运动/普通档按 CLVisit 切行程段；省电档按天**。
+- **OQ-1（会话分组）✅ 更新（co-creator 2026-07-24）**：**Daily/High 按 Core Location system pause 切 trip；Eco 按天**。
 - **OQ-2（常驻 × 手动 Start）— 🅃🄾🄳🄾 先不管**：常驻 ON 时用户再点 Start 高精度录制如何切换/叠加。倾向"手动 Start 临时提权 High，停止落回常驻档"，但**本 feature 暂不处理，记为 todo**。
-- **OQ-3（duty-cycle 周期）**：省电档周期短开 GPS 的开/关时长（Design Gate + dogfood 定）。
+- **OQ-3（duty-cycle 周期）✅ superseded**：Daily 不走 probe-heavy/duty-cycle；Eco 保持 SLC/Visit。
 
 ## 实现计划（Design Gate 产出 · opus 2026-07-10）
 

@@ -49,7 +49,7 @@ struct RecordSettingsView: View {
 
                     Text(persistentRecordingEnabled
                          ? "Persistent \(persistentStatus). Manual Start is disabled until this is turned off."
-                         : "Records automatically in the background with Significant Location, Visit, and motion gating.")
+                         : "Records automatically with system-managed pause/resume plus low-power wakeups.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -126,7 +126,7 @@ struct RecordSettingsView: View {
                     } label: {
                         Label("清空诊断日志", systemImage: "trash")
                     }
-                    Text("常驻记录诊断（CMMotion 决策 / 采集开关 / 记点）。行走后导出发我评估。测试前建议先清空。")
+                    Text("常驻记录诊断（system pause/resume / CMMotion 标签 / 批量写入 / 记点）。行走后导出发我评估。测试前建议先清空。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

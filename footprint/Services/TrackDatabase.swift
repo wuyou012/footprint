@@ -341,6 +341,22 @@ final class TrackDatabase {
             ])
     }
 
+    func appendTrackPoints(_ points: [TrackPoint]) throws {
+        guard !points.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            for point in points {
+                try appendTrackPoint(point)
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
     func loadTrackPoints(forSessionID sessionID: Int64, limit: Int = 20_000) throws -> [TrackPoint] {
         let safeLimit = max(0, min(50_000, limit))
         let totalCount = try trackPointCount(forSessionID: sessionID)

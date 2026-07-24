@@ -37,7 +37,7 @@ enum RecordingProfile: String, CaseIterable, Identifiable {
     var distanceFilter: CLLocationDistance {
         switch self {
         case .high: 10
-        case .daily: 30
+        case .daily: 15
         case .eco: 200
         }
     }
@@ -53,7 +53,7 @@ enum RecordingProfile: String, CaseIterable, Identifiable {
     var minDistanceMeters: CLLocationDistance {
         switch self {
         case .high: 8
-        case .daily: 25
+        case .daily: 12
         case .eco: 180
         }
     }
@@ -61,7 +61,7 @@ enum RecordingProfile: String, CaseIterable, Identifiable {
     var minIntervalSeconds: TimeInterval {
         switch self {
         case .high: 1
-        case .daily: 10
+        case .daily: 5
         case .eco: 30
         }
     }
@@ -104,6 +104,7 @@ enum RecordingSessionKind: String, CaseIterable, Hashable {
 enum AmbientSessionOrigin: String, CaseIterable, Hashable {
     case day
     case visit
+    case trip
 }
 
 struct TrackPoint: Identifiable, Hashable {

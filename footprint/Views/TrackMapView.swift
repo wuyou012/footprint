@@ -160,6 +160,7 @@ struct TrackMapAppearance {
 
 struct TrackMapView: View {
     let points: [TrackPoint]
+    var mapAnchorCoordinate: CLLocationCoordinate2D?
     var followLatest = false
     var mapStyle: FootprintMapStyle = .standard
     var mapDimension: FootprintMapDimension = .twoD
@@ -179,6 +180,7 @@ struct TrackMapView: View {
 
     init(
         points: [TrackPoint],
+        mapAnchorCoordinate: CLLocationCoordinate2D? = nil,
         followLatest: Bool = false,
         mapStyle: FootprintMapStyle = .standard,
         mapDimension: FootprintMapDimension = .twoD,
@@ -188,6 +190,7 @@ struct TrackMapView: View {
         appearance: TrackMapAppearance = .live
     ) {
         self.points = points
+        self.mapAnchorCoordinate = mapAnchorCoordinate
         self.followLatest = followLatest
         self.mapStyle = mapStyle
         self.mapDimension = mapDimension
@@ -208,7 +211,9 @@ struct TrackMapView: View {
             count: points.count,
             lastTimestampMs: points.last?.timestampMs,
             lastLatitude: points.last?.latitude,
-            lastLongitude: points.last?.longitude
+            lastLongitude: points.last?.longitude,
+            anchorLatitude: mapAnchorCoordinate?.latitude,
+            anchorLongitude: mapAnchorCoordinate?.longitude
         )
     }
 
@@ -345,6 +350,10 @@ struct TrackMapView: View {
 
     private func fitToTrack() {
         guard let trackRegion else {
+            if let mapAnchorCoordinate {
+                position = cameraPosition(for: Self.anchorRegion(centeredAt: mapAnchorCoordinate))
+                return
+            }
             position = cameraPosition(for: Self.fallbackRegion)
             return
         }
@@ -374,6 +383,13 @@ struct TrackMapView: View {
         MKCoordinateRegion(
             center: coordinate,
             span: MKCoordinateSpan(latitudeDelta: 0.006, longitudeDelta: 0.006)
+        )
+    }
+
+    private static func anchorRegion(centeredAt coordinate: CLLocationCoordinate2D) -> MKCoordinateRegion {
+        MKCoordinateRegion(
+            center: coordinate,
+            span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
         )
     }
 
@@ -410,4 +426,6 @@ private struct TrackChangeToken: Equatable {
     let lastTimestampMs: Int64?
     let lastLatitude: Double?
     let lastLongitude: Double?
+    let anchorLatitude: Double?
+    let anchorLongitude: Double?
 }
